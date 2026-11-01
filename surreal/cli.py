@@ -39,9 +39,7 @@ class Console:
         self.json_mode = json_mode
         self.quiet = quiet
         if color is None:
-            color = (sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
-                     and os.name != "nt" or (os.name == "nt" and
-                                             "WT_SESSION" in os.environ))
+            color = _supports_color()
         self.color = color
 
     def c(self, text: str, code: str) -> str:
@@ -70,6 +68,16 @@ class Console:
 
     def emit_json(self, obj: Any) -> None:
         print(json.dumps(obj, indent=2, sort_keys=False))
+
+
+def _supports_color() -> bool:
+    """ANSI colour only when it is useful: a TTY, honouring NO_COLOR."""
+    if os.environ.get("NO_COLOR") is not None or not sys.stdout.isatty():
+        return False
+    if os.name != "nt":
+        return True
+    # classic conhost swallows ANSI; Windows Terminal / ConEmu / mintty do not
+    return bool(os.environ.get("WT_SESSION") or os.environ.get("TERM"))
 
 
 def _die(console: Console, message: str, code: int) -> int:
