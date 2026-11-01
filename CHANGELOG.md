@@ -1,5 +1,9 @@
 # Changelog
 
+All notable changes to **Surrealism Window** (`surreal`). Bundle format version is
+`surreal.morph` v1 throughout; every release is additive within that format, so a
+bundle written for an older version keeps loading.
+
 ## Unreleased
 
 ### Collections across files
@@ -10,10 +14,6 @@
 * New `surreal collection graph <collection> [--json]` shows patches, their target
   file, requirements and conflicts; `collection check --json` now embeds the same
   graph.
-
-All notable changes to **Surrealism Window** (`surreal`). Bundle format version is
-`surreal.morph` v1 throughout; every release is additive within that format, so a
-bundle written for an older version keeps loading.
 
 ## v0.5.0 — layout changes, vaults, dependencies, repos
 
