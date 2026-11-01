@@ -20,7 +20,7 @@ MB = 1024 * 1024
 class MemoryLimitError(Exception):
     def __init__(self, want_mb: float, limit_mb: float, what: str):
         super().__init__(
-            "refusing to allocate ~%.0f MB for %s (limit %.0f MB, --max-mem)\n"
+            "refusing to allocate ~%.0f MB for %s (budget %.0f MB, --max-mem)\n"
             "  → this machine has little RAM to spare; raise --max-mem only if "
             "you really have it" % (want_mb, what, limit_mb))
         self.want_mb = want_mb
@@ -71,24 +71,40 @@ def peak_rss_mb() -> float:
     return 0.0
 
 
-class MemoryBudget:
-    """A pre-flight check for allocations that scale with file size."""
+SMALL_ALLOW_MB = 32.0
 
-    def __init__(self, limit_mb: float = 256.0):
+
+class MemoryBudget:
+    """A pre-flight check for allocations that scale with file size.
+
+    Two thresholds, because "peak RSS" is a process-wide number that can already
+    sit above the budget for unrelated reasons (an mmap, an earlier big read):
+
+    * anything at or below ``small_allow_mb`` is always allowed — refusing a
+      200 KB allocation helps nobody;
+    * a big allocation must fit in ``limit - peak``.
+    """
+
+    def __init__(self, limit_mb: float = 256.0, small_allow_mb: float = SMALL_ALLOW_MB):
         self.limit_mb = float(limit_mb)
+        self.small_allow_mb = float(small_allow_mb)
 
     def note(self) -> str:
-        return "max-mem %d MB (current peak %.0f MB)" % (
-            round(self.limit_mb), peak_rss_mb())
+        return "max-mem %d MB (peak %.0f MB, small reads ≤ %d MB free)" % (
+            round(self.limit_mb), peak_rss_mb(), round(self.small_allow_mb))
 
     def reserve(self, nbytes: int, what: str) -> None:
         """Raise :class:`MemoryLimitError` if ``nbytes`` would blow the budget."""
         if nbytes <= 0:
             return
         want_mb = nbytes / float(MB)
+        if want_mb <= self.small_allow_mb:
+            return
+        if want_mb > self.limit_mb:
+            raise MemoryLimitError(want_mb, self.limit_mb, what)
         headroom = self.limit_mb - peak_rss_mb()
         if want_mb > headroom:
-            raise MemoryLimitError(want_mb, self.limit_mb, what)
+            raise MemoryLimitError(want_mb, max(headroom, 0.0), what)
 
     def read_file(self, path: str, what: str = "file") -> bytes:
         size = os.path.getsize(path)
@@ -113,3 +129,9 @@ def set_default(limit_mb: Optional[float]) -> MemoryBudget:
     if limit_mb is not None:
         DEFAULT_BUDGET = MemoryBudget(limit_mb)
     return DEFAULT_BUDGET
+
+
+def restore(budget: MemoryBudget) -> None:
+    """Put a previous budget back (so an in-process CLI run cannot leak it)."""
+    global DEFAULT_BUDGET
+    DEFAULT_BUDGET = budget

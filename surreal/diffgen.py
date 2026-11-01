@@ -46,19 +46,35 @@ class Range:
 def compare_files(old_path: str, new_path: str, merge_gap: int = DEFAULT_MERGE_GAP,
                   max_ranges: int = 10000) -> List[Range]:
     """Return merged differing ranges between two same-length files."""
+    ranges, tail = compare_files_ex(old_path, new_path, merge_gap, max_ranges,
+                                    allow_size_change=False)
+    return ranges
+
+
+def compare_files_ex(old_path: str, new_path: str, merge_gap: int = DEFAULT_MERGE_GAP,
+                     max_ranges: int = 10000, allow_size_change: bool = True):
+    """Compare two files, allowing a size change at EOF.
+
+    Returns ``(ranges, tail)`` where ``tail`` is ``None`` or
+    ``("append", bytes)`` / ``("truncate", bytes)``. Only a difference at the
+    very end of the file is represented — a size change anywhere else would
+    move every following byte, which is a different patch class entirely.
+    """
     old_size = os.path.getsize(old_path)
     new_size = os.path.getsize(new_path)
-    if old_size != new_size:
+    if old_size != new_size and not allow_size_change:
         raise DiffError(
-            "files differ in size (%d vs %d bytes): size-changing patches are not "
-            "supported in format v1 (see PLAN.md §3.1 step 5)" % (old_size, new_size))
+            "files differ in size (%d vs %d bytes): size-changing patches are only "
+            "supported for the overlay (see PLAN.md §3.1 step 5)"
+            % (old_size, new_size))
+    common = min(old_size, new_size)
 
     raw: List[Range] = []
     with open(old_path, "rb") as fa, open(new_path, "rb") as fb:
         base = 0
-        while base < old_size:
-            a = fa.read(CHUNK)
-            b = fb.read(CHUNK)
+        while base < common:
+            a = fa.read(min(CHUNK, common - base))
+            b = fb.read(min(CHUNK, common - base))
             if not a or not b:
                 break
             n = min(len(a), len(b))
@@ -88,15 +104,18 @@ def compare_files(old_path: str, new_path: str, merge_gap: int = DEFAULT_MERGE_G
         else:
             merged.append(Range(r.start, r.end))
 
-    # merge single-byte islands inside an already-dirty span (e.g. a changed
-    # integer whose bytes happen to coincide)
-    stable: List[Range] = []
-    for r in merged:
-        if stable and r.start - stable[-1].end <= merge_gap:
-            stable[-1].end = max(stable[-1].end, r.end)
-        else:
-            stable.append(Range(r.start, r.end))
-    return stable
+    # tail: a size difference is only representable when it sits at EOF (the
+    # overlay). Anything else would shift every following byte.
+    tail = None
+    if new_size > old_size:
+        with open(new_path, "rb") as fb:
+            fb.seek(old_size)
+            tail = ("append", fb.read(new_size - old_size))
+    elif old_size > new_size:
+        with open(old_path, "rb") as fa:
+            fa.seek(new_size)
+            tail = ("truncate", fa.read(old_size - new_size))
+    return merged, tail
 
 
 def _candidates_for_anchor(ranges: List[Range], idx: int, size: int) -> List[Tuple[int, int]]:
@@ -142,12 +161,12 @@ def build_bundle(old_path: str, new_path: str, bundle_id: str, name: str,
                  created_utc: Optional[str] = None,
                  budget=None) -> Tuple[Bundle, dict]:
     """Create an in-memory :class:`Bundle`. Returns ``(bundle, stats)``."""
-    ranges = compare_files(old_path, new_path, merge_gap=merge_gap)
-    if not ranges:
+    ranges, tail = compare_files_ex(old_path, new_path, merge_gap=merge_gap)
+    if not ranges and tail is None:
         raise DiffError("the two files are byte-identical — nothing to record")
 
     stats = {"ranges": len(ranges), "anchored": 0, "section_rva": 0,
-             "offset_only": 0, "warnings": []}
+             "offset_only": 0, "warnings": [], "size_delta": 0}
 
     try:
         pe = PE.open(old_path)
@@ -155,6 +174,15 @@ def build_bundle(old_path: str, new_path: str, bundle_id: str, name: str,
         if require_pe:
             raise DiffError("target is not a readable PE image: %s" % exc) from exc
         pe = None
+
+    if tail is not None:
+        stats["size_delta"] = len(tail[1]) * (1 if tail[0] == "append" else -1)
+        if pe is not None:
+            _validate_overlay_change(pe, old_path, new_path, tail, stats)
+        else:
+            stats["warnings"].append(
+                "size change on a non-PE file: recorded as a raw append/truncate "
+                "with no PE-level checks (--force)")
 
     new_fh = open(new_path, "rb")
     try:
@@ -166,7 +194,7 @@ def build_bundle(old_path: str, new_path: str, bundle_id: str, name: str,
                 stats["warnings"].append(
                     "ignored %d difference(s) inside the PE CheckSum field "
                     "(recomputed automatically on apply)" % dropped)
-            if not ranges:
+            if not ranges and tail is None:
                 raise DiffError("the only differences are in the PE checksum field "
                                 "— these builds are identical for patching purposes")
             _warn_about_relocations(pe, ranges, stats)
@@ -227,6 +255,17 @@ def build_bundle(old_path: str, new_path: str, bundle_id: str, name: str,
             if pe is None:
                 stats["offset_only"] += 1
             hunks.append(hunk)
+
+        if tail is not None:
+            kind, blob = tail
+            if kind == "append":
+                hunks.append(Hunk(op="append", expect=[], replace=blob,
+                                  comment="append %d bytes after the last section "
+                                          "(overlay)" % len(blob)))
+            else:
+                hunks.append(Hunk(op="truncate", expect=list(blob), replace=b"",
+                                  comment="truncate %d trailing overlay bytes"
+                                          % len(blob)))
 
         sha = sha256_file(old_path)
         target = pe.identity(sha) if pe is not None else {
@@ -289,6 +328,50 @@ def _warn_about_relocations(pe: PE, ranges: List[Range], stats: dict) -> None:
             "%d hunk(s) overwrite relocated (absolute-address) fields: %s — apply "
             "will refuse these unless you have verified rebasing"
             % (len(hits), where))
+
+
+def _validate_overlay_change(pe: PE, old_path: str, new_path: str,
+                             tail: Tuple[str, bytes], stats: dict) -> None:
+    """Refuse size changes that touch mapped image data.
+
+    Growing into or out of a section would change ``SizeOfImage``, the section
+    table and every following RVA. Only the overlay (bytes after the last
+    section's raw data) can change size without rewriting the image.
+    """
+    kind, blob = tail
+    new_size = os.path.getsize(new_path)
+    new_start = pe.size if kind == "append" else new_size
+    if new_start < pe.last_section_end:
+        raise DiffError(
+            "the size change starts at 0x%X, inside the last section (which ends at "
+            "0x%X). Resizing a section needs new headers and relocated RVAs — "
+            "out of scope for this format version." % (new_start, pe.last_section_end))
+    try:
+        new_pe = PE.open(new_path)
+    except (PEError, OSError) as exc:
+        raise DiffError("the modified build is not a readable PE image: %s" % exc) from exc
+    try:
+        if len(new_pe.sections) != len(pe.sections):
+            raise DiffError(
+                "the modified build has %d sections, the original has %d — adding or "
+                "removing sections is not supported" % (len(new_pe.sections),
+                                                       len(pe.sections)))
+        for old_sec, new_sec in zip(pe.sections, new_pe.sections):
+            signature = (old_sec.name, old_sec.virtual_address, old_sec.raw_ptr,
+                         old_sec.raw_size, old_sec.virtual_size)
+            if signature != (new_sec.name, new_sec.virtual_address,
+                             new_sec.raw_ptr, new_sec.raw_size,
+                             new_sec.virtual_size):
+                raise DiffError(
+                    "section %s was resized or moved between the builds; only "
+                    "overlay size changes are supported" % old_sec.name)
+        if new_pe.last_section_end != pe.last_section_end:
+            raise DiffError("the section layout moved between the builds")
+        stats["warnings"].append(
+            "size change confined to the overlay: %s %d bytes after 0x%X"
+            % (kind, len(blob), pe.last_section_end))
+    finally:
+        new_pe.close()
 
 
 def exclude_checksum(ranges: List[Range], checksum_off: int) -> Tuple[List[Range], int]:

@@ -41,6 +41,15 @@ class Resolved:
     expect: bytes
     replace: bytes
     located_by: str
+    op: str = "patch"
+
+    @property
+    def grows_file(self) -> bool:
+        return self.op == "append"
+
+    @property
+    def shrinks_file(self) -> bool:
+        return self.op == "truncate"
 
 
 @dataclass
@@ -54,13 +63,15 @@ class Plan:
     old_checksum: Optional[int] = None
     signature: Optional[Dict[str, Any]] = None
     relocs: List[Dict[str, Any]] = field(default_factory=list)
+    checksum_applicable: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "target": self.target,
             "original_sha256": self.original_sha256,
             "hunks": [
-                {"index": r.index, "offset": r.offset, "length": r.length,
+                {"index": r.index, "op": r.op, "offset": r.offset,
+                 "length": r.length,
                  "expect": format_hex(r.expect), "replace": format_hex(r.replace),
                  "located_by": r.located_by}
                 for r in self.resolved
@@ -162,6 +173,34 @@ def resolve_anchor(bundle: Bundle, anchor_index: int, pe: PE) -> int:
 
 def resolve_hunk(bundle: Bundle, hunk: Hunk, index: int, pe: PE,
                  anchor_offsets: Dict[int, int]) -> Resolved:
+    if hunk.op == "append":
+        # Only the overlay can grow: mapped sections cannot change size without
+        # rewriting the section table, SizeOfImage and every later RVA.
+        if pe.size > pe.last_section_end:
+            pass  # there is an overlay already; we append after it
+        return Resolved(index=index, offset=pe.size, length=len(hunk.replace),
+                        expect=b"", replace=hunk.replace, located_by="end of file",
+                        op="append")
+    if hunk.op == "truncate":
+        start = pe.size - len(hunk.expect)
+        if start < pe.last_section_end:
+            raise PatchError(
+                "hunk %d: truncate would cut into section data (offset 0x%X is "
+                "before the end of the last section, 0x%X) — shrinking the image "
+                "is not supported" % (index, start, pe.last_section_end), code=3)
+        if start < 0:
+            raise PatchError("hunk %d: truncate removes more bytes than the file has"
+                             % index, code=3)
+        actual = bytes(pe.data[start:pe.size])
+        if actual != bytes(hunk.expect):
+            raise PatchError(
+                "hunk %d: the file does not end with the bytes this bundle removes\n"
+                "    expected tail: %s\n    found tail:    %s"
+                % (index, format_hex(bytes(hunk.expect)), format_hex(actual)), code=3)
+        return Resolved(index=index, offset=start, length=len(hunk.expect),
+                        expect=actual, replace=b"", located_by="end of file",
+                        op="truncate")
+
     candidates: List[tuple] = []
     if hunk.anchor is not None:
         base = anchor_offsets.get(hunk.anchor)
@@ -232,6 +271,21 @@ def check_signature(bundle: Bundle, require: bool = False, config_dir: Optional[
             "signer": bundle.signer()}
 
 
+def _precheck_size_ops(bundle: Bundle, accept_drift: bool) -> None:
+    ops = {h.op for h in bundle.hunks if h.enabled}
+    if "append" in ops and "truncate" in ops:
+        raise PatchError("a bundle cannot both append and truncate", code=3)
+    if ops & {"append", "truncate"}:
+        if accept_drift:
+            raise PatchError(
+                "this bundle changes the file size (append/truncate), which is only "
+                "safe against the exact build it was authored for — re-run without "
+                "--accept-drift", code=3)
+        if any(h.section or h.anchor is not None for h in bundle.hunks
+               if h.op != "patch"):
+            raise PatchError("size-changing hunks cannot carry image locators", code=3)
+
+
 def build_plan(bundle: Bundle, target_path: str, accept_drift: bool = False,
                require_signature: bool = False, config_dir: Optional[str] = None,
                extra_trusted: Optional[List[str]] = None,
@@ -239,9 +293,15 @@ def build_plan(bundle: Bundle, target_path: str, accept_drift: bool = False,
     if not os.path.isfile(target_path):
         raise PatchError("target not found: %s" % target_path, code=5)
     sha = sha256_file(target_path)
+    _precheck_size_ops(bundle, accept_drift)
     try:
         pe = PE.open(target_path)
     except (PEError, OSError) as exc:
+        # Non-PE targets are allowed when the bundle only needs raw offsets and
+        # EOF operations (that is what `diff --force` produces).
+        if _is_raw_bundle(bundle):
+            return _build_raw_plan(bundle, target_path, sha, accept_drift,
+                                   require_signature, config_dir, extra_trusted)
         raise PatchError("target is not a readable PE image: %s" % exc, code=3) from exc
     try:
         plan = Plan(target=os.path.abspath(target_path), original_sha256=sha)
@@ -271,28 +331,144 @@ def build_plan(bundle: Bundle, target_path: str, accept_drift: bool = False,
                 continue
             plan.resolved.append(resolve_hunk(bundle, hunk, idx, pe, anchor_offsets))
 
-        _check_overlaps(plan.resolved)
-        _check_relocations(pe, plan, allow_abs_address)
+        _check_size_ops(plan, accept_drift)
+        _check_overlaps([r for r in plan.resolved if r.op == "patch"],
+                        has_size_ops=any(r.op != "patch" for r in plan.resolved))
+        _check_relocations(pe, [r for r in plan.resolved if r.op == "patch"],
+                           plan, allow_abs_address)
 
         plan.old_checksum = pe.stored_checksum
-        plan.new_checksum = _predict_checksum(pe, plan.resolved)
+        if any(r.op != "patch" for r in plan.resolved):
+            plan.new_checksum = None  # depends on the new size; computed on write
+            plan.notes.append("file size changes: the PE checksum is recomputed "
+                              "from the written file (size is part of the sum)")
+        else:
+            plan.new_checksum = _predict_checksum(pe, plan.resolved)
         return plan
     finally:
         pe.close()
 
 
-def _check_overlaps(resolved: List[Resolved]) -> None:
+def _check_overlaps(resolved: List[Resolved], has_size_ops: bool = False) -> None:
     ordered = sorted(resolved, key=lambda r: r.offset)
     for a, b in zip(ordered, ordered[1:]):
         if a.offset + a.length > b.offset:
             raise PatchError("hunks %d and %d overlap at 0x%X"
                              % (a.index, b.index, b.offset), code=3)
-    total = sum(r.length for r in resolved)
-    if total == 0:
+    if not resolved and not has_size_ops:
         raise PatchError("nothing to patch", code=3)
 
 
-def _check_relocations(pe: PE, plan: Plan, allow_abs_address: bool) -> None:
+def _is_raw_bundle(bundle: Bundle) -> bool:
+    """True when no hunk needs PE knowledge (raw offsets and EOF ops only)."""
+    for h in bundle.hunks:
+        if not h.enabled:
+            continue
+        if h.op != "patch":
+            continue
+        if h.offset is None or h.section is not None or h.rva is not None \
+                or h.anchor is not None:
+            return False
+    return True
+
+
+def _build_raw_plan(bundle: Bundle, target_path: str, sha: str,
+                    accept_drift: bool, require_signature: bool,
+                    config_dir: Optional[str], extra_trusted: Optional[List[str]]
+                    ) -> Plan:
+    size = os.path.getsize(target_path)
+    plan = Plan(target=os.path.abspath(target_path), original_sha256=sha)
+    sig = check_signature(bundle, require=require_signature, config_dir=config_dir,
+                          extra_trusted=extra_trusted)
+    plan.signature = sig
+    if sig["state"] != "valid":
+        plan.warnings.append("signature: %s" % sig["message"])
+    else:
+        plan.notes.append("signature: %s" % sig["message"])
+
+    problems = []
+    want_size = bundle.target.get("size")
+    if want_size is not None and int(want_size) != size:
+        problems.append("size %d (bundle expects %s)" % (size, want_size))
+    want_sha = (bundle.target.get("sha256") or "").lower()
+    if want_sha and want_sha != sha:
+        problems.append("sha256 %s… (bundle expects %s…)" % (sha[:16], want_sha[:16]))
+    if problems:
+        if accept_drift:
+            plan.warnings.append("drift accepted (--accept-drift): " + "; ".join(problems))
+        else:
+            raise PatchError("target does not match this bundle: " + "; ".join(problems),
+                             code=3)
+    if bundle.target.get("pe"):
+        plan.warnings.append(
+            "bundle records PE metadata but the target is not a readable PE — "
+            "checksum handling is skipped")
+
+    with open(target_path, "rb") as fh:
+        head_tail = {}
+        for idx, hunk in enumerate(bundle.hunks):
+            if not hunk.enabled:
+                plan.notes.append("hunk %d disabled, skipped" % idx)
+                continue
+            if hunk.op == "append":
+                plan.resolved.append(Resolved(index=idx, offset=size,
+                                              length=len(hunk.replace), expect=b"",
+                                              replace=hunk.replace,
+                                              located_by="end of file", op="append"))
+                continue
+            if hunk.op == "truncate":
+                start = size - len(hunk.expect)
+                if start < 0:
+                    raise PatchError("hunk %d: truncate removes more than the file has"
+                                     % idx, code=3)
+                fh.seek(start)
+                actual = fh.read(len(hunk.expect))
+                if actual != bytes(hunk.expect):
+                    raise PatchError("hunk %d: file tail does not match 'expect'"
+                                     % idx, code=3)
+                plan.resolved.append(Resolved(index=idx, offset=start,
+                                              length=len(hunk.expect), expect=actual,
+                                              replace=b"", located_by="end of file",
+                                              op="truncate"))
+                continue
+            offset = int(hunk.offset or 0)
+            if offset + hunk.length > size:
+                raise PatchError("hunk %d resolves outside the file" % idx, code=3)
+            fh.seek(offset)
+            actual = bytes(fh.read(hunk.length))
+            mask = [v is not None for v in hunk.expect]
+            if any(m and actual[i] != hunk.expect[i] for i, m in enumerate(mask)):
+                raise PatchError(
+                    "hunk %d at 0x%X does not contain the expected original bytes\n"
+                    "    expected: %s\n    found:    %s"
+                    % (idx, offset,
+                       " ".join("%02X" % v if v is not None else "??"
+                                for v in hunk.expect), format_hex(actual)), code=3)
+            plan.resolved.append(Resolved(index=idx, offset=offset, length=hunk.length,
+                                          expect=actual, replace=hunk.replace,
+                                          located_by="file offset 0x%X" % offset))
+    _check_size_ops(plan, accept_drift)
+    _check_overlaps([r for r in plan.resolved if r.op == "patch"],
+                    has_size_ops=any(r.op != "patch" for r in plan.resolved))
+    plan.new_checksum = None
+    plan.checksum_applicable = False
+    plan.notes.append("non-PE target: PE checksum is not applicable")
+    return plan
+
+
+def _check_size_ops(plan: Plan, accept_drift: bool) -> None:
+    ops = {r.op for r in plan.resolved}
+    if "append" in ops and "truncate" in ops:
+        raise PatchError("a bundle cannot both append and truncate", code=3)
+    if (ops & {"append", "truncate"}) and accept_drift:
+        raise PatchError(
+            "this bundle changes the file size (append/truncate), which is only "
+            "safe against the exact build it was authored for — re-run without "
+            "--accept-drift", code=3)
+
+
+def _check_relocations(pe: PE, resolved: List[Resolved], plan: Plan,
+                       allow_abs_address: bool) -> None:
     """ASLR safety: a hunk that rewrites an absolute address needs a fixup.
 
     Windows rebases images at load time using ``.reloc``. Writing a raw absolute
@@ -301,9 +477,9 @@ def _check_relocations(pe: PE, plan: Plan, allow_abs_address: bool) -> None:
     """
     from .reloc import analyse_hunks
 
-    if not plan.resolved:
+    if not resolved:
         return
-    risks = analyse_hunks(pe, plan.resolved)
+    risks = analyse_hunks(pe, resolved)
     for risk in risks:
         if not risk.reloc_hits:
             continue
@@ -421,26 +597,48 @@ def apply_bundle(bundle: Bundle, target_path: str, dry_run: bool = False,
                              code=5)
 
         # 2. patch the copy
+        size_changed = any(r.op != "patch" for r in plan.resolved)
         with open(tmp_path, "r+b") as fh:
             for r in sorted(plan.resolved, key=lambda x: x.offset):
-                fh.seek(r.offset)
-                fh.write(r.replace)
-            if not no_checksum:
-                fh.flush()
-                _write_checksum(fh, plan.new_checksum or 0)
+                if r.op == "append":
+                    fh.seek(0, os.SEEK_END)
+                    fh.write(r.replace)
+                elif r.op == "truncate":
+                    fh.seek(r.offset)
+                    fh.truncate()
+                else:
+                    fh.seek(r.offset)
+                    fh.write(r.replace)
+            fh.flush()
+            if not no_checksum and plan.checksum_applicable:
+                csum = _checksum_of_file(tmp_path) if size_changed \
+                    else (plan.new_checksum or 0)
+                _write_checksum(fh, csum)
             fh.flush()
             os.fsync(fh.fileno())
 
         new_sha = sha256_file(tmp_path)
 
-        # 3. verify the result reads back as a valid PE
-        try:
-            with PE.open(tmp_path) as pe2:
-                if not no_checksum and not pe2.checksum_valid():
-                    raise PatchError("post-patch checksum verification failed", code=5)
-        except PEError as exc:
-            raise PatchError("patched copy is no longer a valid PE (%s) — original "
-                             "untouched" % exc, code=5) from exc
+        # 3. verify the result still looks like what we aimed for
+        if plan.checksum_applicable:
+            try:
+                with PE.open(tmp_path) as pe2:
+                    if not no_checksum and not pe2.checksum_valid():
+                        raise PatchError("post-patch checksum verification failed",
+                                         code=5)
+            except PEError as exc:
+                raise PatchError("patched copy is no longer a valid PE (%s) — original "
+                                 "untouched" % exc, code=5) from exc
+        else:
+            # raw bundle: at least prove every written hunk reads back
+            with open(tmp_path, "rb") as fh:
+                for r in plan.resolved:
+                    if r.op == "truncate":
+                        continue
+                    fh.seek(r.offset)
+                    if fh.read(len(r.replace)) != r.replace:
+                        raise PatchError("hunk %d did not read back after writing"
+                                         % r.index, code=5)
 
         # 4. backup, then atomically swap in the patched copy
         if not no_backup:
@@ -452,7 +650,11 @@ def apply_bundle(bundle: Bundle, target_path: str, dry_run: bool = False,
             "sha256_before": plan.original_sha256,
             "sha256_after": new_sha,
             "backup": backup_path,
-            "bytes_written": sum(r.length for r in plan.resolved),
+            "bytes_written": sum(len(r.replace) for r in plan.resolved
+                                 if r.op != "truncate"),
+            "bytes_removed": sum(r.length for r in plan.resolved
+                                 if r.op == "truncate"),
+            "size_after": os.path.getsize(target),
         })
         journal.record(
             "apply", bundle_id=bundle.id, bundle_name=bundle.name,
@@ -473,6 +675,12 @@ def apply_bundle(bundle: Bundle, target_path: str, dry_run: bool = False,
         raise
     finally:
         lock.release()
+
+
+def _checksum_of_file(path: str) -> int:
+    """Checksum of an arbitrary on-disk image (needed when the size changed)."""
+    with PE.open(path) as pe:
+        return pe.compute_checksum()
 
 
 def _write_checksum(fh, checksum: int) -> None:

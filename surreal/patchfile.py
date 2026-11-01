@@ -20,8 +20,9 @@ ALLOWED_KEYS = {
     "hunks", "policy", "signature",
 }
 ALLOWED_TARGET_KEYS = {"filename", "size", "sha256", "pe", "authenticode", "sections"}
-ALLOWED_HUNK_KEYS = {"anchor", "delta", "section", "rva", "offset", "expect",
-                     "replace", "comment", "enabled"}
+ALLOWED_HUNK_KEYS = {"op", "anchor", "delta", "section", "rva", "offset",
+                     "expect", "replace", "comment", "enabled"}
+HUNK_OPS = {"patch", "append", "truncate"}
 ALLOWED_ANCHOR_KEYS = {"name", "pattern", "file_offset", "rva", "section", "unique",
                        "comment"}
 
@@ -47,6 +48,7 @@ class Hunk:
     offset: Optional[int] = None
     comment: str = ""
     enabled: bool = True
+    op: str = "patch"
 
     @property
     def length(self) -> int:
@@ -54,6 +56,8 @@ class Hunk:
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
+        if self.op != "patch":
+            out["op"] = self.op
         if self.anchor is not None:
             out["anchor"] = self.anchor
             out["delta"] = self.delta
@@ -236,31 +240,60 @@ class Bundle:
             if strict and set(h) - ALLOWED_HUNK_KEYS:
                 raise BundleError("hunk %d has unknown keys: %s"
                                   % (i, ", ".join(sorted(set(h) - ALLOWED_HUNK_KEYS))))
+            op = str(h.get("op") or "patch")
+            if op not in HUNK_OPS:
+                raise BundleError("hunk %d: unknown op %r (expected one of %s)"
+                                  % (i, op, ", ".join(sorted(HUNK_OPS))))
             if "replace" not in h:
                 raise BundleError("hunk %d has no 'replace' bytes" % i)
             try:
-                replace = parse_hex_bytes(h["replace"])
+                raw_replace = h["replace"]
+                if not str(raw_replace).strip() and op == "truncate":
+                    replace = b""
+                else:
+                    replace = parse_hex_bytes(raw_replace)
             except ValueError as exc:
                 raise BundleError("hunk %d replace: %s" % (i, exc)) from exc
-            if not replace:
-                raise BundleError("hunk %d has an empty 'replace'" % i)
             expect_raw = h.get("expect")
+            if expect_raw is None and op == "append":
+                expect_raw = ""
             if expect_raw is None:
                 raise BundleError("hunk %d has no 'expect' bytes (refusing a blind patch)" % i)
             try:
-                expect = parse_hex_tokens(expect_raw)
+                expect = parse_hex_tokens(expect_raw) if str(expect_raw).strip() else []
             except ValueError as exc:
                 raise BundleError("hunk %d expect: %s" % (i, exc)) from exc
-            if len(expect) != len(replace):
-                raise BundleError(
-                    "hunk %d: expect is %d bytes but replace is %d (size-changing "
-                    "patches are not supported yet)" % (i, len(expect), len(replace)))
+
+            if op == "patch":
+                if not replace:
+                    raise BundleError("hunk %d has an empty 'replace'" % i)
+                if len(expect) != len(replace):
+                    raise BundleError(
+                        "hunk %d: expect is %d bytes but replace is %d — an "
+                        "in-place hunk cannot change the size (use op "
+                        "\"append\"/\"truncate\" for overlay changes)"
+                        % (i, len(expect), len(replace)))
+            elif op == "append":
+                if not replace:
+                    raise BundleError("hunk %d: append needs bytes to append" % i)
+                if expect:
+                    raise BundleError("hunk %d: append hunks carry no 'expect' "
+                                      "(the target sha256 is the precondition)" % i)
+                if h.get("anchor") is not None or h.get("section") is not None:
+                    raise BundleError("hunk %d: append hunks attach to the end of "
+                                      "the file and cannot be anchored" % i)
+            elif op == "truncate":
+                if not expect:
+                    raise BundleError("hunk %d: truncate needs the bytes it removes "
+                                      "in 'expect'" % i)
+                if replace:
+                    raise BundleError("hunk %d: truncate cannot replace bytes" % i)
             anchor_idx = _opt_int(h.get("anchor"))
             if anchor_idx is not None and not (0 <= anchor_idx < len(anchors)):
                 raise BundleError("hunk %d references anchor %d which does not exist"
                                   % (i, anchor_idx))
             hunks.append(Hunk(
-                expect=expect, replace=replace, anchor=anchor_idx,
+                op=op, expect=expect, replace=replace, anchor=anchor_idx,
                 delta=_opt_int(h.get("delta")) or 0,
                 section=h.get("section"), rva=_opt_int(h.get("rva")),
                 offset=_opt_int(h.get("offset")),

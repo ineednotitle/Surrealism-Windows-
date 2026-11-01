@@ -302,7 +302,10 @@ def cmd_diff(args, console: Console) -> int:
     console.kv("hunks", len(bundle.hunks))
     console.kv("anchored", "%d (unique literal context)" % stats["anchored"])
     console.kv("section+rva", stats["section_rva"])
-    console.kv("bytes changed", sum(h.length for h in bundle.hunks))
+    console.kv("bytes changed", sum(h.length for h in bundle.hunks
+                                    if h.op != "append"))
+    if stats.get("size_delta"):
+        console.kv("size delta", "%+d bytes (overlay)" % stats["size_delta"])
     console.kv("target sha256", bundle.target.get("sha256", ""))
     for warn in stats["warnings"]:
         console.warn(warn)
@@ -342,6 +345,10 @@ def cmd_info(args, console: Console) -> int:
     console.head("  hunks (%d)" % len(bundle.hunks))
     for i, h in enumerate(bundle.hunks):
         where = []
+        if h.op == "append":
+            where.append("end of file (append +%d bytes)" % len(h.replace))
+        elif h.op == "truncate":
+            where.append("end of file (truncate -%d bytes)" % len(h.expect))
         if h.anchor is not None:
             where.append("anchor %d+%d" % (h.anchor, h.delta))
         if h.section and h.rva is not None:
@@ -350,10 +357,13 @@ def cmd_info(args, console: Console) -> int:
             where.append("offset 0x%X" % h.offset)
         console.say("    [%d] %-34s %d bytes%s" %
                     (i, ", ".join(where) or "unlocated", h.length,
-                     "" if h.enabled else "  (disabled)"))
-        console.say("        - %s" % " ".join(
-            "%02X" % v if v is not None else "??" for v in h.expect)[:100])
-        console.say("        + %s" % format_hex(h.replace)[:100])
+                     "" if not h.enabled else "" if h.enabled and h.op == "patch"
+                     else ""))
+        if h.expect:
+            console.say("        - %s" % " ".join(
+                "%02X" % v if v is not None else "??" for v in h.expect)[:100])
+        if h.replace:
+            console.say("        + %s" % format_hex(h.replace)[:100])
         if h.comment:
             console.say("        · %s" % h.comment)
     console.say("")
@@ -396,8 +406,15 @@ def cmd_check(args, console: Console) -> int:
     for warn in plan.warnings:
         console.warn(warn)
     console.kv("hunks", len(plan.resolved))
-    console.kv("checksum", "0x%08X → 0x%08X" % (plan.old_checksum or 0,
-                                                plan.new_checksum or 0))
+    if plan.new_checksum is None:
+        console.kv("checksum", "recomputed on write (the file size is part of the sum)")
+    else:
+        console.kv("checksum", "0x%08X → 0x%08X" % (plan.old_checksum or 0,
+                                                    plan.new_checksum))
+    size_ops = [r for r in plan.resolved if r.op != "patch"]
+    for r in size_ops:
+        console.kv("size change", "%s %d bytes at end of file"
+                   % (r.op, len(r.replace) if r.op == "append" else r.length))
     if plan.relocs:
         console.kv("aslr", "%d hunk(s) touch relocated fields (accepted)"
                    % len({r["hunk"] for r in plan.relocs}))
@@ -451,14 +468,21 @@ def cmd_apply(args, console: Console) -> int:
     if args.dry_run:
         console.ok("dry run OK — %d hunk(s) would be written, nothing changed"
                    % result["hunks"])
-        console.kv("checksum", "0x%08X → 0x%08X"
-                   % (result["old_checksum"] or 0, result["new_checksum"] or 0))
+        if result.get("new_checksum") is None:
+            console.kv("checksum", "recomputed on write (file size changes)")
+        else:
+            console.kv("checksum", "0x%08X → 0x%08X"
+                       % (result["old_checksum"] or 0, result["new_checksum"]))
         return EXIT_OK
     console.ok("patched %s (%d hunk(s), %d bytes)"
                % (os.path.basename(result["target"]), result["hunks"],
                   result.get("bytes_written", 0)))
     console.kv("sha256 before", result["sha256_before"])
     console.kv("sha256 after", result["sha256_after"])
+    if result.get("size_after") is not None:
+        console.kv("size after", "%d bytes" % result["size_after"])
+    if result.get("bytes_removed"):
+        console.kv("bytes removed", result["bytes_removed"])
     if result.get("backup"):
         console.kv("backup", result["backup"])
     console.say("\n  undo with: surreal revert %s" % os.path.basename(args.target))
@@ -862,6 +886,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     console = Console(json_mode=getattr(args, "json", False),
                       quiet=getattr(args, "quiet", False))
+    previous_budget = memguard.DEFAULT_BUDGET
     memguard.set_default(getattr(args, "max_mem", None))
     if not getattr(args, "func", None):
         parser.print_help()
@@ -875,6 +900,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return _die(console, str(exc), EXIT_IO)
     except BrokenPipeError:  # e.g. `surreal inspect x.exe | head`
         return EXIT_OK
+    finally:
+        memguard.restore(previous_budget)
 
 
 if __name__ == "__main__":  # pragma: no cover

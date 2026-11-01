@@ -230,6 +230,7 @@ def run_selftest(keep: bool = False, workdir: Optional[str] = None,
     ok = True
     base = workdir or tempfile.mkdtemp(prefix="surreal-selftest-")
     os.makedirs(base, exist_ok=True)
+    base_dir = base
 
     def step(name: str, fn) -> None:
         nonlocal ok
@@ -371,6 +372,30 @@ def run_selftest(keep: bool = False, workdir: Optional[str] = None,
                 lock.release()
 
         step("apply lock excludes a second holder", _lock)
+
+        def _overlay_append():
+            with open(old, "rb") as fh:
+                base = fh.read()
+            grown = os.path.join(base_dir, "demo_overlay.exe")
+            payload = b"[overlay]appended-by-selftest\r\n"
+            with open(grown, "wb") as fh:
+                fh.write(base + payload)
+            ob, _ = diffgen.build_bundle(old, grown, "org.surreal.selftest.overlay",
+                                         "overlay")
+            if [h.op for h in ob.hunks] != ["append"]:
+                raise AssertionError("expected exactly one append hunk, got %r"
+                                     % [h.op for h in ob.hunks])
+            path = os.path.join(base_dir, "overlay.morph")
+            ob.save(path)
+            res = patcher.apply_bundle(Bundle.load(path), old)
+            if res["size_after"] != os.path.getsize(grown):
+                raise AssertionError("append did not grow the file")
+            patcher.revert(old)
+            if os.path.getsize(old) != os.path.getsize(grown) - len(payload):
+                raise AssertionError("revert did not restore the size")
+            return "append +%d bytes, revert restored the size" % len(payload)
+
+        step("overlay size change (append + revert)", _overlay_append)
 
         def _bad_bundle():
             bad = os.path.join(base, "bad.morph")

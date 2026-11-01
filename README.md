@@ -197,6 +197,25 @@ changed since it was patched.
   (`--force` non-PE diffs, fallbacks) *before* allocating, so surreal fails with
   a clear message instead of swapping a 4 GB machine to death.
 
+### Size-changing patches (v0.3, overlay only)
+
+`surreal diff` now also handles two builds whose **overlay** differs in size —
+the bytes after the last section, which are not mapped into the image:
+
+```bash
+# old.exe and new.exe differ only by trailing overlay data
+surreal diff old.exe new.exe -o add-config.morph --id me.add-config
+#   hunks: 1   op=append   +88 bytes (overlay)
+surreal apply add-config.morph --target old.exe     # file grows, checksum recomputed
+surreal apply remove-config.morph --target old.exe  # op=truncate, file shrinks back
+```
+
+Deliberately refused, with a message naming the section that moved: resizing a
+section, adding/removing sections, or any size change inside mapped image data.
+Those need header rewrites and RVA fixups; pretending otherwise is how patchers
+ship corrupt executables. Size-changing bundles also refuse `--accept-drift`,
+because an append is only meaningful on the exact build it was authored for.
+
 ## Low-end by design (4 GB RAM, 2 cores, HDD)
 
 | Concern | How |
@@ -262,7 +281,8 @@ contributor is allowed to modify.
 |---|---|
 | **M0 (shipped)** | PE parser, scanner, diff→bundle, apply/revert/journal, policy gate, CI, exe build |
 | **M1 (shipped, v0.2)** | ed25519-signed bundles + trusted-key store, crash-safe apply lock, ASLR/relocation safety checks, `--max-mem` guard |
-| M2 | size-changing patches (append section / extend overlay) with explicit opt-in |
+| **M2-lite (shipped, v0.3)** | `op: append` / `op: truncate` for overlay size changes; everything inside the image still refused |
+| M2+ | `op: extend-section` / `op: add-section` with explicit opt-in, header rewriting, RVA fixups |
 | M3 | multi-file "vault" bundles (apply N files atomically), patch dependencies |
 | M4 | `--tui` and `apply --repo` for curated bundle collections |
 

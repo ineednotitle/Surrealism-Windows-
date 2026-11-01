@@ -307,13 +307,16 @@ class TestCli(TempDirCase):
         self.assertEqual(code, 0, err)
 
     def test_max_mem_guard_refuses_huge_read(self):
-        code, _, err = run("--max-mem", "0.001", "diff", self.app, self.app2,
+        # 2 MiB files: above the small-allocation floor (32 MB is the floor, so
+        # use a budget of 1 MB to trip it), PE path never reads whole files
+        code, _, err = run("--max-mem", "1", "diff", self.app, self.app2,
                            "-o", self.bundle, "--id", "x", "--force")
-        self.assertEqual(code, 0)  # PE path never reads whole files
-        # the non-PE fallback must refuse
-        p1 = write(self.path("t1.bin"), b"a" * 65536)
-        p2 = write(self.path("t2.bin"), b"a" * 32768 + b"b" + b"a" * 32767)
-        code, _, err = run("--max-mem", "0.001", "diff", p1, p2, "-o",
+        self.assertEqual(code, 0, err)
+        # the non-PE fallback must refuse when the read exceeds the budget
+        blob = b"a" * (40 * 1024 * 1024)
+        p1 = write(self.path("t1.bin"), blob)
+        p2 = write(self.path("t2.bin"), blob[:-1] + b"b")
+        code, _, err = run("--max-mem", "8", "diff", p1, p2, "-o",
                            self.bundle, "--id", "x", "--force")
         self.assertEqual(code, 5)
         self.assertIn("--max-mem", err)

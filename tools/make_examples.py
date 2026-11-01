@@ -15,7 +15,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from surreal.diffgen import build_bundle  # noqa: E402
-from surreal.testkit import make_pe_pair  # noqa: E402
+from surreal.testkit import make_pe_pair, sample_app  # noqa: E402
 
 EXAMPLES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         "examples")
@@ -41,6 +41,31 @@ def main() -> int:
         bundle.save(out)
         print("wrote %s (%d hunks, %d anchored)" % (out, len(bundle.hunks),
                                                     stats["anchored"]))
+
+        # a second example: an overlay append (the only size change v1 allows)
+        grown = os.path.join(tmp, "demo_app_overlay.exe")
+        with open(old, "rb") as fh:
+            base = fh.read()
+        payload = (b"\r\n[SURREAL-DEMO]\r\noverlay=appended-by-surreal\r\n"
+                   b"purpose=demonstrate-size-changing-patch\r\n")
+        with open(grown, "wb") as fh:
+            fh.write(base + payload)
+        overlay, ostats = build_bundle(
+            old, grown,
+            bundle_id="org.surreal.demo.append-overlay",
+            name="Demo: append an overlay config blob",
+            author="surreal demo",
+            description=("Appends %d bytes after the last section. Overlay growth "
+                         "is the only size change that needs no header, section "
+                         "table or RVA fixups." % len(payload)),
+            notes=("Practice bundle for the generated demo_app.exe. The append is "
+                   "verified by the target hash; truncate is the inverse op."),
+            created_utc="2026-11-01T00:00:00Z",
+        )
+        out2 = os.path.join(EXAMPLES, "demo-append-overlay.morph")
+        overlay.save(out2)
+        print("wrote %s (%d hunk, %+d bytes)" % (out2, len(overlay.hunks),
+                                                 ostats["size_delta"]))
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

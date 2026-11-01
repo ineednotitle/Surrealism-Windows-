@@ -66,6 +66,7 @@ exactly the case anchors exist to survive.
 |---|---|
 | `expect` | **required.** Original bytes; same length as `replace`; may contain `??` wildcards (those bytes are not compared). Never omit it — the loader rejects bundles without expectations, so no bundle can patch blind. |
 | `replace` | **required.** Fixed bytes, no wildcards, non-empty. |
+| `op` | `"patch"` (default), `"append"` or `"truncate"` — see below |
 | `anchor` + `delta` | hunk starts at `anchor_match_offset + delta` |
 | `section` + `rva` | hunk starts at the file offset of `rva` inside `section` |
 | `offset` | absolute file offset (last resort, and for non-PE `--force` diffs) |
@@ -92,12 +93,33 @@ applied only if every non-wildcard byte matches.
 Resolved hunk ranges must not overlap; overlapping hunks abort the whole apply
 (no partial writes, no "last one wins").
 
-### Size changes
+### Size changes: `op`
 
-`len(expect) == len(replace)` is enforced by the loader. Format v1 is
-**size-preserving by design**: writing into a PE can grow sections or the code
-cave, but that changes the image, the section table and every RVA after it —
-that is M2 work with its own explicit opt-in flag.
+Format v1 understands three operations:
+
+| `op` | `expect` | `replace` | Address | Meaning |
+|---|---|---|---|---|
+| `patch` (default) | required, same length as `replace` | required, non-empty | anchor / section+rva / offset | in-place overwrite |
+| `append` | must be empty | the bytes to append | end of file | grow the overlay |
+| `truncate` | the trailing bytes to remove | must be empty | end of file | shrink the overlay |
+
+**Why only the overlay?** Growing or shrinking inside a mapped region would
+change `SizeOfImage`, the section table and every following RVA. The overlay —
+the bytes after the last section's raw data — is not mapped as part of the image,
+so changing its size needs no header edits and no relocations. `surreal diff`
+refuses any other size change, with a message naming the section that moved.
+
+Extra rules enforced by the loader and the planner:
+
+* `append` and `truncate` cannot be mixed in one bundle (ordering would be
+  ambiguous), and neither can carry `anchor` / `section` / `rva`.
+* Size-changing bundles require an **exact** target match: `--accept-drift` is
+  refused (an append is only meaningful on the build it was authored for).
+* `truncate` verifies the file really ends with the bytes in `expect`.
+* The PE checksum includes the file size, so it is recomputed from the written
+  file; `check` reports "recomputed on write" instead of a predicted value.
+* Raw (non-PE) targets are supported only for bundles made entirely of raw
+  offsets and EOF ops — that is what `surreal diff --force` produces.
 
 ## `policy`
 

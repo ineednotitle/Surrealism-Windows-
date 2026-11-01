@@ -316,7 +316,27 @@ surreal init | inspect | scan | diff | info | check | apply | revert | demo | se
 | ASLR / relocation safety | `surreal/reloc.py` | refuses writes to relocated absolute fields; `--allow-abs-address` opt-in; authoring-time warning |
 | memory ceiling | `surreal/memguard.py` | `--max-mem` (default 256 MB) refuses oversized reads *before* allocating |
 
-Still deferred: size-changing patches, multi-file vaults, TUI, repo client.
+### M2-lite (shipped in v0.3)
+
+`op: "append"` and `op: "truncate"` make size-changing bundles possible **for the
+overlay only** — the bytes after the last section's raw data, which are not part
+of the mapped image, so no header, section-table or RVA edit is needed.
+
+* `diff` detects a pure EOF size delta, validates it against both PE images
+  (identical section table, change starts at/after the last section's end) and
+  otherwise refuses with the offending section name.
+* `apply` seeks to EOF (or `ftruncate`s), recomputes the PE checksum from the
+  written file (the size is part of the sum), re-parses the result, and journals
+  the new size; `revert` restores it.
+* Guards: append/truncate cannot be mixed, cannot carry image locators, and
+  refuse `--accept-drift`; the loader rejects an in-place hunk that changes
+  length.
+* Non-PE targets are now patchable when a bundle consists only of raw offsets
+  and EOF ops (`diff --force`), with read-back verification instead of a PE
+  checksum.
+
+Deferred to M2+: `extend-section` / `add-section` with header rewriting and
+relocation fixups; then multi-file vaults, TUI, repo client.
 
 ## 7. Milestones
 
