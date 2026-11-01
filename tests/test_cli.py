@@ -3,6 +3,7 @@ import io
 import json
 import os
 import unittest
+import unittest.mock
 
 from helpers import TempDirCase, sample_app, write
 
@@ -485,6 +486,54 @@ class TestCli(TempDirCase):
         self.assertEqual(code, 3)
         self.assertIn("does not match the repo index", err)
         self.assertEqual(sha256_file(self.app), before)
+
+    def test_tui_toggle_and_apply(self):
+        pdir = self.make_collection()
+        run("init", "--accept-policy")
+        before = sha256_file(self.app)
+        answers = iter(["1", "2", "a"])
+        with unittest.mock.patch("builtins.input", lambda *a: next(answers)):
+            code, out, err = run("tui", "--target", self.app, "--dir", pdir, "-y")
+        self.assertEqual(code, 0, err)
+        self.assertIn("[x]", out)
+        self.assertIn("applied 2 bundle(s)", out)
+        self.assertNotEqual(sha256_file(self.app), before)
+        self.assertEqual(run("revert", self.app)[0], 0)
+        self.assertEqual(sha256_file(self.app), before)
+
+    def test_tui_quit_and_eof(self):
+        pdir = self.make_collection()
+        answers = iter(["q"])
+        with unittest.mock.patch("builtins.input", lambda *a: next(answers)):
+            code, _, err = run("tui", "--target", self.app, "--dir", pdir)
+        self.assertEqual(code, 0, err)
+
+        def eof(*_a):
+            raise EOFError
+
+        with unittest.mock.patch("builtins.input", eof):
+            code, _, _ = run("tui", "--target", self.app, "--dir", pdir)
+        self.assertEqual(code, 0)
+
+    def test_tui_rejects_mismatched_selection(self):
+        pdir = self.make_collection()
+        run("init", "--accept-policy")
+        other = write(self.path("other.exe"), sample_app(patch=True))
+        answers = iter(["1", "a", "q"])
+        with unittest.mock.patch("builtins.input", lambda *a: next(answers)):
+            code, out, err = run("tui", "--target", other, "--dir", pdir, "-y")
+        self.assertEqual(code, 0)
+        self.assertIn("do not match this build", err)
+
+    def test_tui_usage_errors(self):
+        pdir = self.make_collection()
+        self.assertEqual(run("tui", "--target", self.path("nope.exe"),
+                             "--dir", pdir)[0], 2)
+        self.assertEqual(run("tui", "--target", self.app,
+                             "--dir", self.path("nowhere"))[0], 2)
+        empty = self.path("empty")
+        os.makedirs(empty)
+        self.assertEqual(run("tui", "--target", self.app, "--dir", empty)[0], 3)
 
     def test_version_and_help(self):
         code, out, _ = run("--version")

@@ -528,10 +528,15 @@ def apply_collection(collection: Collection, target_path: str,
                        applied=[a["bundle"] for a in applied],
                        restored=restored, backup=backup,
                        error=str(exc))
+        if not applied and not backup:
+            tail = "nothing was written"
+        elif restored:
+            tail = "target restored from backup"
+        else:
+            tail = ("ROLLBACK FAILED — restore %s manually" % backup
+                    if backup else "ROLLBACK FAILED — no backup was taken")
         message = "%s\n  → applied %d patch(es) before failing; %s" % (
-            exc, len(applied),
-            "target restored from backup" if restored
-            else "ROLLBACK FAILED — restore %s manually" % backup)
+            exc, len(applied), tail)
         raise CollectionError(message) from exc
 
     final_sha = sha256_file(target)

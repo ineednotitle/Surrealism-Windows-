@@ -1081,6 +1081,129 @@ def cmd_repo(args, console: Console) -> int:
     return EXIT_OK
 
 
+def cmd_tui(args, console: Console) -> int:
+    """A dependency-free interactive menu: pick bundles, then apply them.
+
+    Deliberately not curses: plain ``input()`` works in every Windows console,
+    over SSH and in the frozen ``surreal.exe``, and it can be scripted by piping
+    lines into stdin (which is also how the tests drive it).
+    """
+    from . import collection as coll
+    from .journal import Journal
+
+    directory = os.path.abspath(args.dir or ".")
+    if not os.path.isdir(directory):
+        return _die(console, "not a directory: %s" % directory, EXIT_USAGE)
+    target = os.path.abspath(args.target) if args.target else ""
+    if not target or not os.path.isfile(target):
+        return _die(console, "--target must be an existing file (the binary you "
+                             "want to patch)", EXIT_USAGE)
+
+    console.head(BANNER)
+    names = sorted(f for f in os.listdir(directory) if f.lower().endswith(".morph"))
+    if not names:
+        return _die(console, "no .morph bundles in %s" % directory, EXIT_MISMATCH)
+    sha = sha256_file(target)
+    entries = []
+    for filename in names:
+        path = os.path.join(directory, filename)
+        try:
+            bundle = Bundle.load(path)
+        except BundleError as exc:
+            console.warn("skipping %s: %s" % (filename, exc))
+            continue
+        entries.append((filename, path, bundle, coll.matches(bundle, target, sha)))
+    if not entries:
+        return _die(console, "no readable bundles in %s" % directory, EXIT_MISMATCH)
+
+    selected = set()
+    while True:
+        console.say("")
+        console.kv("target", os.path.basename(target))
+        console.kv("bundles", directory)
+        console.say("")
+        for i, (filename, _path, bundle, applies) in enumerate(entries, start=1):
+            mark = "[x]" if (i - 1) in selected else "[ ]"
+            state = "matches this build" if applies else "does NOT match this build"
+            signed = ""
+            if bundle.signature:
+                trusted = keys.is_trusted(policy.config_dir(),
+                                          bundle.signature.get("public_key", ""))
+                signed = " · signed by %s%s" % (bundle.signer(),
+                                                "" if trusted else " (untrusted)")
+            console.say("  %s %d. %-44s %s%s"
+                        % (mark, i, bundle.name[:44], state, signed))
+            if bundle.is_policy_blocked():
+                console.say("        · policy-blocked: %s" % bundle.is_policy_blocked())
+        console.say("")
+        console.say("  numbers toggle · a apply · r revert last · q quit")
+        try:
+            answer = input("  > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.say("")
+            return EXIT_OK
+        if answer in ("q", "quit", "exit"):
+            return EXIT_OK
+        if answer in ("r", "revert"):
+            try:
+                result = patcher.revert(target, force_unlock=args.force_unlock)
+            except patcher.PatchError as exc:
+                console.err(str(exc))
+                continue
+            console.ok("restored %s (%s…)" % (os.path.basename(target),
+                                              result["restored_sha256"][:8]))
+            continue
+        if answer in ("a", "apply"):
+            chosen = [entries[i] for i in sorted(selected)]
+            if not chosen:
+                console.warn("nothing selected")
+                continue
+            mismatched = [c for c in chosen if not c[3]]
+            if mismatched:
+                console.err("these do not match this build: %s"
+                            % ", ".join(c[0] for c in mismatched))
+                continue
+            try:
+                policy.require_acceptance()
+            except PermissionError as exc:
+                console.err(str(exc))
+                continue
+            if not _confirm(console, "apply %d bundle(s) to %s?"
+                            % (len(chosen), target), args.yes):
+                console.err("aborted (no changes written)")
+                continue
+            collection = coll.Collection(
+                name="interactive: " + os.path.basename(directory),
+                base_dir=directory,
+                path=None,
+                entries=[coll.Entry(bundle_file=filename, bundle=bundle, path=path,
+                                    order=index * 10)
+                         for index, (filename, path, bundle, _ok)
+                         in enumerate(chosen, start=1)])
+            try:
+                result = coll.apply_collection(collection, target)
+            except (coll.CollectionError, patcher.PatchError) as exc:
+                console.err(str(exc))
+                continue
+            console.ok("applied %d bundle(s); target is now %s…"
+                       % (len(result["applied"]), result["sha256_after"][:8]))
+            console.kv("undo", "surreal revert %s" % os.path.basename(target))
+            return EXIT_OK
+        digits = [d for d in answer.replace(",", " ").split() if d.isdigit()]
+        if not digits:
+            console.warn("type numbers, 'a', 'r' or 'q'")
+            continue
+        for digit in digits:
+            index = int(digit) - 1
+            if not 0 <= index < len(entries):
+                console.warn("no bundle %s" % digit)
+                continue
+            if index in selected:
+                selected.remove(index)
+            else:
+                selected.add(index)
+
+
 def cmd_demo(args, console: Console) -> int:
     """Write a synthetic 'app' + a patch bundle to a directory, to try the flow."""
     from .testkit import make_pe_pair
@@ -1322,6 +1445,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--keep-backups", type=int, default=3)
     sp.add_argument("--lax", action="store_true")
     sp.set_defaults(func=cmd_repo)
+
+    sp = add("tui", "pick bundles from a folder interactively, then apply them")
+    sp.add_argument("--target", required=True, help="the binary you want to patch")
+    sp.add_argument("--dir", default="", help="folder of .morph bundles (default: .)")
+    sp.add_argument("--yes", "-y", action="store_true", help="do not ask again")
+    sp.add_argument("--force-unlock", action="store_true")
+    sp.set_defaults(func=cmd_tui)
 
     sp = add("demo", "write a synthetic demo app + patch bundle to a directory")
     sp.add_argument("--out", default="surreal-demo", help="output directory")

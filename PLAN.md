@@ -415,7 +415,15 @@ integrity record rather than a trust anchor (signatures + the trusted-key store
 remain the authority), and nothing is fetched — the tool has no network code and
 CI fails if one is added.
 
-Next: optional sandboxed patch scripting, `--tui`.
+### M4 (shipped in v0.5) — interactive mode
+
+`surreal tui --target app.exe --dir patches/` lists the bundles in a folder, marks
+which ones match the running build, and applies the chosen selection as one
+transaction. It is plain `input()` rather than curses: no dependency, it works in
+the PyInstaller `.exe`, over SSH and when piped, and the tests drive it by
+supplying answers on stdin.
+
+Next: sandboxed patch scripting, cross-collection dependency checks.
 
 ## 7. Milestones
 
@@ -425,7 +433,7 @@ Next: optional sandboxed patch scripting, `--tui`.
 | M1 | ed25519 `.morph` signatures (pure-Python, no dependency), trusted-key store, apply lock, ASLR/relocation checks, `--max-mem` | bundles are tamper-evident and safe on relocatable images — **done (v0.2)** |
 | M2 | size-changing patches (append overlay — **done v0.3**; extend/add section — **done v0.5**), manifest/vault for multi-file apps | patch a 3-file app atomically |
 | M3 | multi-file vaults and patch dependencies/conflicts (**done v0.5**), optional patch scripting (sandboxed, no shell) | community patch repo works |
-| M4 | TUI (`--tui`) + patch repository client (**repo index/list/show/apply done v0.5**) | one-command "apply all trusted bundles" |
+| M4 | TUI + patch repository client (**`surreal tui` and `repo index/list/show/apply` done v0.5**) | one-command "apply all trusted bundles" |
 
 ## 8. Risks & mitigations
 

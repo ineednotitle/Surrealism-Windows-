@@ -43,6 +43,11 @@ bundle written for an older version keeps loading.
   index with per-bundle sha256, target identity, ops and signer. Applying refuses
   a bundle whose bytes no longer match the index. Still zero network code.
 
+### Interactive mode
+* `surreal tui --target app.exe --dir patches/`: toggle bundles with numbers,
+  `a` to apply the selection as one transaction, `r` to revert, `q` to quit. Plain
+  line input (no curses), so it works frozen, over SSH and when piped.
+
 ### Other
 * `collection apply --dry-run` (single-target and vault).
 * Windows lock/permission errors during the swap now explain what to do instead

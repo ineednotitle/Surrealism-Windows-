@@ -102,6 +102,7 @@ $ python -m surreal check surreal-demo/demo-shorten-nag.morph `
 | `revert <exe>` | restore the last backup (`--list` shows the journal) |
 | `collection list/check/apply` | apply a set of bundles as one transaction (all-or-nothing, one backup); `target` per entry → multi-file vault |
 | `repo index/list/show/apply` | index a folder of bundles (with hashes), list matches for a build, apply one by id |
+| `tui --target <exe> [--dir patches/]` | interactive menu: toggle bundles, apply the selection as one transaction, revert |
 | `sign <morph> --key me.key` | sign a bundle (ed25519); makes it tamper-evident |
 | `verify <morph> [--require]` | check the signature and whether the key is trusted |
 | `keys --generate/--trust/--untrust` | manage your signing key and trusted-key store |
@@ -256,6 +257,20 @@ surreal apply remove-config.morph --target old.exe  # op=truncate, file shrinks 
 Size-changing bundles also refuse `--accept-drift`, because an append is only
 meaningful on the exact build it was authored for.
 
+### Interactive mode (v0.5): `surreal tui`
+
+For picking patches without remembering syntax:
+
+```bash
+surreal tui --target "C:/Apps/BetterApp/app.exe" --dir patches/
+```
+
+It lists every `.morph` in the folder, marks which ones match *this* build, and
+accepts numbers to toggle, `a` to apply the selection (one backup, all-or-nothing
+— the same code path as `collection apply`), `r` to revert the last apply, `q` to
+quit. No curses, no extra dependency: plain line input, so it works in the frozen
+`.exe`, over SSH and when piped (`printf '1\na\n' | surreal tui ...`).
+
 ### Local patch repos (v0.5): a curated set, one command
 
 No network code exists in surreal (CI enforces it), so a repo is a JSON index of
@@ -404,7 +419,8 @@ Release notes: [`CHANGELOG.md`](CHANGELOG.md).
 | **M3 vault (shipped, v0.5)** | `target` per patch entry → N binaries patched as one transaction, per-file backups and journals |
 | **M3 deps (shipped, v0.5)** | `depends_on` topological ordering, `conflicts_with` refusal, unique ids |
 | **M4 repo (shipped, v0.5)** | `surreal repo index/list/show/apply`: local index with per-bundle integrity hashes and target matching |
-| M3 | patch scripting (sandboxed, no shell) |
+| **M4 tui (shipped, v0.5)** | `surreal tui`: dependency-free interactive selector that applies the chosen bundles as one transaction |
+| M5 | sandboxed patch scripting, patch dependencies across collections |
 | M4 | `--tui` and `apply --repo` for curated bundle collections |
 
 MIT licensed. Not affiliated with Morphe, ReVanced or any vendor whose software
