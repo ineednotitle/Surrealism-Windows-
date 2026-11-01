@@ -20,10 +20,14 @@ a = Analysis(
     binaries=[],
     datas=[],
     hiddenimports=[
+        # every module in the package: the CLI imports some lazily, and a frozen
+        # build must not miss one (selftest alone touches surgery, collection and
+        # repo)
         "surreal", "surreal.cli", "surreal.pe", "surreal.scanner",
         "surreal.patchfile", "surreal.diffgen", "surreal.patcher",
         "surreal.journal", "surreal.policy", "surreal.testkit", "surreal.util",
         "surreal.keys", "surreal.lock", "surreal.memguard", "surreal.reloc",
+        "surreal.collection", "surreal.repo", "surreal.surgery",
     ],
     hookspath=[],
     hooksconfig={},

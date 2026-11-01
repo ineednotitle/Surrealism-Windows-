@@ -125,8 +125,9 @@ jobs:
           python -m pip install --upgrade pip pyinstaller
           python -m PyInstaller --clean --noconfirm build/surreal.spec
       - name: Smoke test the frozen binary
-        shell: pwsh
+        shell: bash
         run: |
+          set -o pipefail
           ./dist/surreal.exe --version
           ./dist/surreal.exe selftest
           ./dist/surreal.exe demo --out frozen-demo
@@ -134,8 +135,26 @@ jobs:
           ./dist/surreal.exe keys --generate frozen-demo/frozen.key --label frozen
           ./dist/surreal.exe sign frozen-demo/demo-shorten-nag.morph --key frozen-demo/frozen.key
           ./dist/surreal.exe verify frozen-demo/demo-shorten-nag.morph
-          $size = "{0:N1} MB" -f ((Get-Item ./dist/surreal.exe).Length / 1MB)
-          "size: $size" | Tee-Object -FilePath size.txt
+          ./dist/surreal.exe init --accept-policy
+          ./dist/surreal.exe apply frozen-demo/demo-shorten-nag.morph --target frozen-demo/demo_app.exe -y
+          ./dist/surreal.exe revert frozen-demo/demo_app.exe
+          cp -r examples frozen-demo/examples
+          ./dist/surreal.exe collection list frozen-demo/examples
+          ./dist/surreal.exe repo index frozen-demo/examples -o frozen-demo/repo.json
+          ./dist/surreal.exe repo list frozen-demo/repo.json --target frozen-demo/demo_app.exe
+          printf 'q\n' | ./dist/surreal.exe tui --target frozen-demo/demo_app.exe --dir frozen-demo/examples
+      - name: Report frozen-binary failure
+        if: failure()
+        shell: bash
+        run: echo "::error title=frozen exe::a command in the smoke test above failed - see the step log"
+      - name: Measure size
+        shell: bash
+        run: |
+          python - <<'EOF' | tee size.txt
+          import os
+          size = os.path.getsize(os.path.join("dist", "surreal.exe"))
+          print("size: %.1f MB (%d bytes)" % (size / 1048576.0, size))
+          EOF
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
