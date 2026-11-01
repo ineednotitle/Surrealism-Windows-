@@ -310,6 +310,24 @@ The safety story is a proof, not a promise:
 * A bundle may contain exactly one size-changing hunk, and never together with
   `--accept-drift`: these ops are positional, so identity is the whole safety net.
 
+## Try it on your own binary (read-only)
+
+Before you trust a patch, prove the pipeline on a binary you have lying around.
+`tools/smoke_real_binary.py` copies the file to a temp directory and checks parse,
+scan, diff→apply→revert, an overlay round-trip and a header-surgery round-trip:
+
+```bash
+python tools/smoke_real_binary.py "C:\Program Files\Notepad++\notepad++.exe"
+#   ok  inspect — x64, 7 section(s), checksum valid, overlay 0 bytes
+#   ok  diff + apply — 1 hunk at 0x1A240, applied byte-for-byte
+#   ok  header surgery (extend-section) — grew .rsrc … checksum valid, reverted
+#   7/7 step(s) passed
+```
+
+Your file is never modified — only the copy — and a failing step leaves the temp
+directory behind with the work-in-progress files. The same script is what CI runs
+against the generated demo PE.
+
 ## Low-end by design (4 GB RAM, 2 cores, HDD)
 
 | Concern | How |

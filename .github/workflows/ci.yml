@@ -113,6 +113,8 @@ jobs:
           python -m surreal repo show examples/surreal-repo.json --id org.surreal.demo.shorten-nag
           python -m surreal repo apply examples/surreal-repo.json --id org.surreal.demo.shorten-nag --target demo-out/demo_app.exe -y
           python -m surreal revert demo-out/demo_app.exe
+      - name: Real-binary smoke harness (on the demo PE)
+        run: python tools/smoke_real_binary.py demo-out/demo_app.exe
       - name: Performance budget
         run: python tools/bench.py --mb 32
 
