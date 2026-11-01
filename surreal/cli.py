@@ -35,6 +35,31 @@ BANNER = "surreal %s — Surrealism Window · windows patch workbench" % __versi
 # --------------------------------------------------------------------------- #
 # output helpers
 # --------------------------------------------------------------------------- #
+# A Windows console is often cp1252 (or cp437 in a legacy conhost). Printing "✓"
+# there raises UnicodeEncodeError, which would crash the tool mid-report — so the
+# glyphs degrade to ASCII instead.
+_ASCII_FALLBACK = {
+    ord("✓"): "+", ord("✗"): "x", ord("·"): "-", ord("→"): "->",
+    ord("—"): "-", ord("…"): "...", ord("×"): "x", ord("≥"): ">=",
+    ord("≤"): "<=", ord("•"): "*", ord("’"): "'", ord("“"): '"',
+    ord("”"): '"',
+}
+
+
+def _supports_unicode(stream) -> bool:
+    """Can this stream encode the characters the UI likes to use?"""
+    encoding = getattr(stream, "encoding", None) or "ascii"
+    try:
+        "✓✗·→—…".encode(encoding)
+        return True
+    except (UnicodeEncodeError, LookupError):
+        return False
+
+
+def _ascii_safe(text: str) -> str:
+    return text.translate(_ASCII_FALLBACK)
+
+
 class Console:
     def __init__(self, json_mode: bool = False, quiet: bool = False,
                  color: Optional[bool] = None):
@@ -43,30 +68,38 @@ class Console:
         if color is None:
             color = _supports_color()
         self.color = color
+        self.unicode = _supports_unicode(sys.stdout) and _supports_unicode(sys.stderr)
 
     def c(self, text: str, code: str) -> str:
         if not self.color:
             return text
         return "\x1b[%sm%s\x1b[0m" % (code, text)
 
+    def text(self, value: Any) -> str:
+        """Sanitise for the current console encoding (no-op on a UTF-8 stream)."""
+        text = value if isinstance(value, str) else str(value)
+        return text if self.unicode else _ascii_safe(text)
+
     def say(self, text: str = "") -> None:
         if not self.quiet:
-            print(text)
+            print(self.text(text))
 
     def head(self, text: str) -> None:
         self.say(self.c(text, "1;36"))
 
     def ok(self, text: str) -> None:
-        self.say(self.c("  ✓ ", "32") + text)
+        self.say(self.c("  ✓ " if self.unicode else "  OK ", "32") + text)
 
     def warn(self, text: str) -> None:
-        print(self.c("  ! ", "33") + text, file=sys.stderr)
+        print(self.text(self.c("  ! ", "33") + text), file=sys.stderr)
 
     def err(self, text: str) -> None:
-        print(self.c("  ✗ ", "31") + text, file=sys.stderr)
+        print(self.text(self.c("  ✗ " if self.unicode else "  XX ", "31") + text),
+              file=sys.stderr)
 
     def kv(self, key: str, value: Any, indent: int = 2) -> None:
-        self.say("%s%-22s %s" % (" " * indent, key + ":", value))
+        self.say("%s%-22s %s" % (" " * indent, key + ":",
+                                 value if isinstance(value, str) else value))
 
     def emit_json(self, obj: Any) -> None:
         print(json.dumps(obj, indent=2, sort_keys=False))
@@ -1474,6 +1507,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     console = Console(json_mode=getattr(args, "json", False),
                       quiet=getattr(args, "quiet", False))
+    for stream in (sys.stdout, sys.stderr):
+        # never let an unencodable glyph crash a patch run; the Console already
+        # downgrades to ASCII, this is the last line of defence
+        try:
+            stream.reconfigure(errors="replace")  # type: ignore[attr-defined]
+        except (AttributeError, ValueError):
+            pass
     previous_budget = memguard.DEFAULT_BUDGET
     memguard.set_default(getattr(args, "max_mem", None))
     if not getattr(args, "func", None):
