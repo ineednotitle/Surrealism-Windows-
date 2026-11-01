@@ -12,6 +12,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import traceback
 from typing import Dict, List, Optional, Tuple
 
 FILE_ALIGN = 0x200
@@ -597,6 +598,12 @@ def run_selftest(keep: bool = False, workdir: Optional[str] = None,
             raise AssertionError("invalid bundle was accepted")
 
         step("malformed bundle rejected", _bad_bundle)
+    except BaseException as exc:  # noqa: BLE001 - a crash must be reported, not hidden
+        ok = False
+        report.append("FAIL  %-42s %s: %s"
+                      % ("selftest aborted", type(exc).__name__, exc))
+        for line in traceback.format_exc().strip().splitlines():
+            report.append("      " + line)
     finally:
         if keep:
             report.append("workspace kept at %s" % base)

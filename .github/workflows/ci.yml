@@ -38,7 +38,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          python -m surreal selftest 2>&1 | tee selftest.log
+          python -u -m surreal selftest 2>&1 | tee selftest.log
       - name: CLI smoke
         run: |
           python -m surreal --help
@@ -135,8 +135,8 @@ jobs:
               done
             else
               # a crash, not a step failure: annotate the tail verbatim
-              tail_text=$(tail -n 12 selftest.log | tr '\n' '|' | sed 's/%/%25/g')
-              echo "::error title=selftest crash::${tail_text:0:900}"
+              tail_text=$(tail -n 40 selftest.log | tr '\n' '|' | sed 's/%/%25/g')
+              echo "::error title=selftest crash::${tail_text:0:3000}"
             fi
           fi
           python - <<'EOF'
