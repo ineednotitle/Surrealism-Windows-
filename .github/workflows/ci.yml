@@ -128,9 +128,16 @@ jobs:
         shell: bash
         run: |
           if [ -f selftest.log ]; then
-            grep -E "^[[:space:]]*FAIL " selftest.log | head -8 | while IFS= read -r line; do
-              echo "::error title=selftest::${line}"
-            done || true
+            fails=$(grep -E "^[[:space:]]*FAIL " selftest.log | head -8 || true)
+            if [ -n "$fails" ]; then
+              printf '%s\n' "$fails" | while IFS= read -r line; do
+                echo "::error title=selftest::${line}"
+              done
+            else
+              # a crash, not a step failure: annotate the tail verbatim
+              tail_text=$(tail -n 12 selftest.log | tr '\n' '|' | sed 's/%/%25/g')
+              echo "::error title=selftest crash::${tail_text:0:900}"
+            fi
           fi
           python - <<'EOF'
           import os, re
