@@ -34,6 +34,10 @@ def peak_rss_mb() -> float:
     return memguard.peak_rss_mb()
 
 
+def _rss(value: float) -> str:
+    return "%.1f MB" % value if value else "n/a"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mb", type=int, default=64)
@@ -116,14 +120,14 @@ def main() -> int:
             holder["sha_before"] = sha256_file(old)
             return "%d hunks, %d anchored" % (len(bundle.hunks), stats["anchored"])
 
-        timed("diff → .morph bundle", _diff)
+        timed("diff -> .morph bundle", _diff)
 
         timed("apply (check+backup+write)",
               lambda: "%d bytes written"
               % patcher.apply_bundle(holder["bundle"], old,
                                      keep_backups=0)["bytes_written"])
 
-        timed("revert", lambda: "%s…" % patcher.revert(old)["restored_sha256"][:8])
+        timed("revert", lambda: "%s..." % patcher.revert(old)["restored_sha256"][:8])
 
         def _sign():
             from surreal import keys
@@ -137,12 +141,13 @@ def main() -> int:
 
         assert sha256_file(old) == holder["sha_before"], "revert mismatch"
 
-        print("surreal bench — %s fixture (%d cores)" % (human_size(size),
+        # ASCII only: a Windows console may be cp437/cp1252
+        print("surreal bench - %s fixture (%d cores)" % (human_size(size),
                                                          os.cpu_count() or 1))
         print("%-28s %9s %10s   %s" % ("step", "time", "peak RSS", "detail"))
         for label, dt, rss, detail in rows:
-            print("%-28s %8.2fs %8.1f MB   %s" % (label, dt, rss, detail))
-        print("\npeak RSS overall: %.1f MB" % peak_rss_mb())
+            print("%-28s %8.2fs %10s   %s" % (label, dt, _rss(rss), detail))
+        print("\npeak RSS overall: %s" % _rss(peak_rss_mb()))
         return 0
     finally:
         if args.keep:
