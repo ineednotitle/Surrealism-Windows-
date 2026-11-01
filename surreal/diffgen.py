@@ -139,7 +139,8 @@ def build_bundle(old_path: str, new_path: str, bundle_id: str, name: str,
                  author: str = "", description: str = "", notes: str = "",
                  merge_gap: int = DEFAULT_MERGE_GAP, require_pe: bool = True,
                  version: str = "1.0.0",
-                 created_utc: Optional[str] = None) -> Tuple[Bundle, dict]:
+                 created_utc: Optional[str] = None,
+                 budget=None) -> Tuple[Bundle, dict]:
     """Create an in-memory :class:`Bundle`. Returns ``(bundle, stats)``."""
     ranges = compare_files(old_path, new_path, merge_gap=merge_gap)
     if not ranges:
@@ -168,6 +169,7 @@ def build_bundle(old_path: str, new_path: str, bundle_id: str, name: str,
             if not ranges:
                 raise DiffError("the only differences are in the PE checksum field "
                                 "— these builds are identical for patching purposes")
+            _warn_about_relocations(pe, ranges, stats)
             header_hits = [r for r in ranges if r.start < pe.size_of_headers]
             if header_hits:
                 stats["warnings"].append(
@@ -178,8 +180,10 @@ def build_bundle(old_path: str, new_path: str, bundle_id: str, name: str,
         if pe is not None:
             data = pe.data
         else:
-            with open(old_path, "rb") as fh:
-                data = fh.read()
+            from .memguard import DEFAULT_BUDGET
+
+            budget = budget or DEFAULT_BUDGET
+            data = budget.read_file(old_path, "target (non-PE, --force)")
         anchors: List[Anchor] = []
         hunks: List[Hunk] = []
 
@@ -253,6 +257,38 @@ def build_bundle(old_path: str, new_path: str, bundle_id: str, name: str,
         new_fh.close()
         if pe is not None:
             pe.close()
+
+
+def _warn_about_relocations(pe: PE, ranges: List[Range], stats: dict) -> None:
+    """Tell the author when a hunk lands on a field the loader rebases."""
+    from .reloc import RELOC_TYPE_NAMES, parse_relocs
+
+    try:
+        table = parse_relocs(pe)
+    except Exception:  # noqa: BLE001 - hostile .reloc data must not kill a diff
+        stats["warnings"].append("could not parse .reloc; ASLR analysis skipped")
+        return
+    if not table:
+        return
+    found = {}
+    for r in ranges:
+        rva = pe.offset_to_rva(r.start)
+        if rva is None:
+            continue
+        for stride in (8, 4):
+            pos = rva - (rva % stride)
+            while pos < rva + r.length:
+                typ = table.covers_rva(pos)
+                if typ and typ != 0:
+                    found.setdefault((r.start, pos), RELOC_TYPE_NAMES.get(typ, str(typ)))
+                pos += stride
+    hits = [(start, pos, kind) for (start, pos), kind in sorted(found.items())]
+    if hits:
+        where = ", ".join("0x%X (%s)" % (off, kind) for _h, off, kind in hits[:6])
+        stats["warnings"].append(
+            "%d hunk(s) overwrite relocated (absolute-address) fields: %s — apply "
+            "will refuse these unless you have verified rebasing"
+            % (len(hits), where))
 
 
 def exclude_checksum(ranges: List[Range], checksum_off: int) -> Tuple[List[Range], int]:

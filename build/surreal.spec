@@ -23,6 +23,7 @@ a = Analysis(
         "surreal", "surreal.cli", "surreal.pe", "surreal.scanner",
         "surreal.patchfile", "surreal.diffgen", "surreal.patcher",
         "surreal.journal", "surreal.policy", "surreal.testkit", "surreal.util",
+        "surreal.keys", "surreal.lock", "surreal.memguard", "surreal.reloc",
     ],
     hookspath=[],
     hooksconfig={},

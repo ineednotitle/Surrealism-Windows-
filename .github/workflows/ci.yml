@@ -39,6 +39,17 @@ jobs:
           python -m surreal demo --out demo-out
           python -m surreal inspect demo-out/demo_app.exe --json
           python -m surreal check demo-out/demo-shorten-nag.morph --target demo-out/demo_app.exe
+      - name: Signing smoke (M1)
+        run: |
+          python -m surreal keys --generate demo-out/ci.key --label ci
+          python -m surreal sign demo-out/demo-shorten-nag.morph --key demo-out/ci.key --signer ci
+          python -m surreal verify demo-out/demo-shorten-nag.morph
+          python -c "import json;print(json.load(open('demo-out/ci.key'))['public_key'])" > pub.txt
+          python -m surreal keys --trust "$(cat pub.txt)" --label ci
+          python -m surreal verify demo-out/demo-shorten-nag.morph --require
+          python -m surreal init --accept-policy
+          python -m surreal apply demo-out/demo-shorten-nag.morph --target demo-out/demo_app.exe -y --require-signature
+          python -m surreal revert demo-out/demo_app.exe
       - name: Performance budget
         run: python tools/bench.py --mb 32
 
@@ -56,6 +67,11 @@ jobs:
         run: |
           if grep -rnE "^\s*(import|from)\s+(socket|urllib|http|ftplib|requests|ssl)" surreal/; then
             echo "::error::surreal must not use the network"; exit 1
+          fi
+      - name: No private keys committed
+        run: |
+          if git ls-files | grep -E "(^|/)([^/]*\.key|[^/]*\.private)$"; then
+            echo "::error::private keys must never be committed"; exit 1
           fi
       - name: No shell execution in the tool
         run: |
@@ -84,6 +100,9 @@ jobs:
           ./dist/surreal.exe selftest
           ./dist/surreal.exe demo --out frozen-demo
           ./dist/surreal.exe check frozen-demo/demo-shorten-nag.morph --target frozen-demo/demo_app.exe
+          ./dist/surreal.exe keys --generate frozen-demo/frozen.key --label frozen
+          ./dist/surreal.exe sign frozen-demo/demo-shorten-nag.morph --key frozen-demo/frozen.key
+          ./dist/surreal.exe verify frozen-demo/demo-shorten-nag.morph
           $size = "{0:N1} MB" -f ((Get-Item ./dist/surreal.exe).Length / 1MB)
           "size: $size" | Tee-Object -FilePath size.txt
       - name: Upload artifact

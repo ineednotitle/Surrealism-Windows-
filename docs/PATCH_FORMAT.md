@@ -17,7 +17,8 @@ top level
 ├── target            identity of the authored build  (required)
 ├── anchors[]         named byte patterns with proven uniqueness
 ├── hunks[]           the actual edits                (at least one, required)
-└── policy            { requires_rights_attestation, forbidden_categories[] }
+├── policy            { requires_rights_attestation, forbidden_categories[] }
+└── signature         optional ed25519 block (see docs/SIGNING.md)
 ```
 
 ## `target`
@@ -111,6 +112,30 @@ category, `apply` refuses with exit 4. The CLI also refuses bundles whose
 id/name/description advertise keygens, cracks or activation bypasses. This is a
 guardrail against this project being used as a piracy tool — the project will
 not host or accept such bundles.
+
+## `signature` (optional, additive within v1)
+
+```json
+"signature": {
+  "alg": "ed25519",
+  "public_key": "4f1c…c9",
+  "signature": "…128 hex chars…",
+  "signed_utc": "2026-11-01T00:00:00Z",
+  "signer": "my handle",
+  "payload_sha256": "…"
+}
+```
+
+Rules:
+
+* The signed payload is the **canonical JSON of the bundle with the `signature`
+  key removed** (sorted keys, no whitespace, UTF-8). Adding, changing or
+  removing a signature therefore never invalidates a *different* signature.
+* `alg` must be `"ed25519"`; anything else is rejected outright.
+* An invalid signature is **always** fatal (exit 4). An unsigned or untrusted
+  bundle is a warning unless the user passes `--require-signature`.
+* The signature says nothing about legality or safety — see
+  [`SIGNING.md`](SIGNING.md) for the exact threat model.
 
 ## Canonical example (complete, 2 hunks)
 

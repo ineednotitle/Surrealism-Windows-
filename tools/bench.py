@@ -126,6 +126,16 @@ def main() -> int:
 
         timed("revert", lambda: "%s…" % patcher.revert(old)["restored_sha256"][:8])
 
+        def _sign():
+            from surreal import keys
+
+            seed = keys.new_seed()
+            signed = keys.sign_bundle(holder["bundle"].to_dict(), seed, signer="bench")
+            keys.verify_bundle(signed)
+            return "sign + verify one bundle"
+
+        timed("bundle signing (ed25519)", _sign)
+
         assert sha256_file(old) == holder["sha_before"], "revert mismatch"
 
         print("surreal bench — %s fixture (%d cores)" % (human_size(size),

@@ -11,6 +11,11 @@ venv/
 # PyInstaller work directory (build/ itself holds our scripts + spec)
 build/surreal/
 
+# signing keys — NEVER commit a private key
+*.key
+*.private
+publisher.key
+
 # surreal runtime artifacts
 .surreal/
 *.morph.tmp

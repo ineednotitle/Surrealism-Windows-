@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .journal import Journal, fsync_dir
+from .lock import LockError, TargetLock
 from .patchfile import Bundle, Hunk
 from .pe import PE, PEError, fold_checksum, sum_words
 from .scanner import ScanError, find_pattern
@@ -51,6 +52,8 @@ class Plan:
     warnings: List[str] = field(default_factory=list)
     new_checksum: Optional[int] = None
     old_checksum: Optional[int] = None
+    signature: Optional[Dict[str, Any]] = None
+    relocs: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -64,6 +67,8 @@ class Plan:
             ],
             "old_checksum": self.old_checksum,
             "new_checksum": self.new_checksum,
+            "signature": self.signature,
+            "relocations": self.relocs,
             "notes": self.notes,
             "warnings": self.warnings,
         }
@@ -207,7 +212,30 @@ def resolve_hunk(bundle: Bundle, hunk: Hunk, index: int, pe: PE,
                     replace=hunk.replace, located_by=how)
 
 
-def build_plan(bundle: Bundle, target_path: str, accept_drift: bool = False) -> Plan:
+def check_signature(bundle: Bundle, require: bool = False, config_dir: Optional[str] = None,
+                    extra_trusted: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Verify the bundle signature (if any) and report the outcome.
+
+    An *invalid* signature is always fatal. An *untrusted* or *missing* one is
+    fatal only when ``require=True`` — otherwise it is surfaced as a warning, so
+    local authoring keeps working without ceremony.
+    """
+    from . import keys, policy
+
+    cfg = config_dir or policy.config_dir()
+    try:
+        state, message, trusted = keys.check_bundle_signature(
+            bundle.to_dict(), cfg, require=require, extra_trusted=extra_trusted)
+    except keys.SignatureError as exc:
+        raise PatchError("bundle signature check failed: %s" % exc, code=4) from exc
+    return {"state": state, "message": message, "trusted": trusted,
+            "signer": bundle.signer()}
+
+
+def build_plan(bundle: Bundle, target_path: str, accept_drift: bool = False,
+               require_signature: bool = False, config_dir: Optional[str] = None,
+               extra_trusted: Optional[List[str]] = None,
+               allow_abs_address: bool = False) -> Plan:
     if not os.path.isfile(target_path):
         raise PatchError("target not found: %s" % target_path, code=5)
     sha = sha256_file(target_path)
@@ -217,6 +245,13 @@ def build_plan(bundle: Bundle, target_path: str, accept_drift: bool = False) -> 
         raise PatchError("target is not a readable PE image: %s" % exc, code=3) from exc
     try:
         plan = Plan(target=os.path.abspath(target_path), original_sha256=sha)
+        sig = check_signature(bundle, require=require_signature, config_dir=config_dir,
+                              extra_trusted=extra_trusted)
+        plan.signature = sig
+        if sig["state"] != "valid":
+            plan.warnings.append("signature: %s" % sig["message"])
+        else:
+            plan.notes.append("signature: %s" % sig["message"])
         plan.warnings.extend(check_identity(bundle, pe, target_path, sha, accept_drift))
 
         if pe.has_signature:
@@ -237,6 +272,7 @@ def build_plan(bundle: Bundle, target_path: str, accept_drift: bool = False) -> 
             plan.resolved.append(resolve_hunk(bundle, hunk, idx, pe, anchor_offsets))
 
         _check_overlaps(plan.resolved)
+        _check_relocations(pe, plan, allow_abs_address)
 
         plan.old_checksum = pe.stored_checksum
         plan.new_checksum = _predict_checksum(pe, plan.resolved)
@@ -254,6 +290,42 @@ def _check_overlaps(resolved: List[Resolved]) -> None:
     total = sum(r.length for r in resolved)
     if total == 0:
         raise PatchError("nothing to patch", code=3)
+
+
+def _check_relocations(pe: PE, plan: Plan, allow_abs_address: bool) -> None:
+    """ASLR safety: a hunk that rewrites an absolute address needs a fixup.
+
+    Windows rebases images at load time using ``.reloc``. Writing a raw absolute
+    address into a field that has no relocation entry produces a binary that
+    works at one base and crashes at another — the classic "works on my machine".
+    """
+    from .reloc import analyse_hunks
+
+    if not plan.resolved:
+        return
+    risks = analyse_hunks(pe, plan.resolved)
+    for risk in risks:
+        if not risk.reloc_hits:
+            continue
+        plan.relocs.append({"hunk": risk.index, "offset": risk.offset,
+                            "rva": pe.offset_to_rva(risk.offset),
+                            "entries": [{"rva": rva, "type": typ}
+                                        for rva, typ in risk.reloc_hits]})
+        message = ("%s — you are writing an absolute address; the loader only "
+                   "fixes it up on rebase if a .reloc entry covers it "
+                   "(check the patched build under a different base)"
+                   % risk.describe(pe))
+        if allow_abs_address:
+            plan.warnings.append("ASLR risk accepted (--allow-abs-address): " + message)
+        else:
+            raise PatchError(
+                message + "\n  → if you have verified the patched image loads at "
+                "another base, re-run with --allow-abs-address", code=3)
+    if not pe.dir(5)[0] and any(r.in_code for r in risks):
+        plan.warnings.append(
+            "target has no .reloc directory: it is either fixed-base or "
+            "relocations were stripped, so absolute-address edits are never "
+            "rebased")
 
 
 def _predict_checksum(pe: PE, resolved: List[Resolved]) -> int:
@@ -296,18 +368,26 @@ def _predict_checksum(pe: PE, resolved: List[Resolved]) -> int:
 # --------------------------------------------------------------------------- #
 def apply_bundle(bundle: Bundle, target_path: str, dry_run: bool = False,
                  no_backup: bool = False, no_checksum: bool = False,
-                 accept_drift: bool = False, keep_backups: int = 3) -> Dict[str, Any]:
+                 accept_drift: bool = False, keep_backups: int = 3,
+                 require_signature: bool = False, config_dir: Optional[str] = None,
+                 extra_trusted: Optional[List[str]] = None,
+                 allow_abs_address: bool = False, force_unlock: bool = False) -> Dict[str, Any]:
     blocked = bundle.is_policy_blocked()
     if blocked:
         raise PatchError("refusing to apply: " + blocked, code=4)
 
-    plan = build_plan(bundle, target_path, accept_drift=accept_drift)
+    plan = build_plan(bundle, target_path, accept_drift=accept_drift,
+                      require_signature=require_signature, config_dir=config_dir,
+                      extra_trusted=extra_trusted,
+                      allow_abs_address=allow_abs_address)
     result: Dict[str, Any] = {
         "bundle": bundle.id,
         "name": bundle.name,
         "target": plan.target,
         "dry_run": dry_run,
         "hunks": len(plan.resolved),
+        "signature": plan.signature,
+        "relocations": plan.relocs,
         "notes": plan.notes,
         "warnings": plan.warnings,
         "old_checksum": plan.old_checksum,
@@ -321,6 +401,13 @@ def apply_bundle(bundle: Bundle, target_path: str, dry_run: bool = False,
     target = os.path.abspath(target_path)
     directory = os.path.dirname(target)
     ext = os.path.splitext(target)[1] or ".bin"
+
+    lock = TargetLock(target, action="apply", bundle_id=bundle.id, force=force_unlock)
+    try:
+        lock.acquire()
+    except LockError as exc:
+        raise PatchError(str(exc), code=5) from exc
+
     tmp_fd, tmp_path = tempfile.mkstemp(prefix=".surreal-", suffix=ext + ".tmp", dir=directory)
     os.close(tmp_fd)
 
@@ -384,6 +471,8 @@ def apply_bundle(bundle: Bundle, target_path: str, dry_run: bool = False,
         except OSError:
             pass
         raise
+    finally:
+        lock.release()
 
 
 def _write_checksum(fh, checksum: int) -> None:
@@ -397,10 +486,22 @@ def _write_checksum(fh, checksum: int) -> None:
 # --------------------------------------------------------------------------- #
 # reverting
 # --------------------------------------------------------------------------- #
-def revert(target_path: str) -> Dict[str, Any]:
+def revert(target_path: str, force_unlock: bool = False) -> Dict[str, Any]:
     target = os.path.abspath(target_path)
     if not os.path.isfile(target):
         raise PatchError("target not found: %s" % target, code=5)
+    lock = TargetLock(target, action="revert", force=force_unlock)
+    try:
+        lock.acquire()
+    except LockError as exc:
+        raise PatchError(str(exc), code=5) from exc
+    try:
+        return _revert_locked(target)
+    finally:
+        lock.release()
+
+
+def _revert_locked(target: str) -> Dict[str, Any]:
     journal = Journal(target)
     entry = journal.last(actions=("apply", "revert"))
     if entry is None:

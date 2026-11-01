@@ -191,6 +191,156 @@ class TestCli(TempDirCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["exit_code"], 3)
 
+    # -- M1: signing / keys / locks / memory -------------------------------- #
+    def keypair(self, name="publisher"):
+        key_path = self.path(name + ".key")
+        code, out, err = run("keys", "--generate", key_path, "--label", name)
+        self.assertEqual(code, 0, err)
+        import json as _json
+        with open(key_path, "r", encoding="utf-8") as fh:
+            record = _json.load(fh)
+        return key_path, record["public_key"]
+
+    def test_sign_verify_and_require_signature(self):
+        self.make_bundle()
+        key_path, pub = self.keypair()
+        self.assertEqual(run("init", "--accept-policy")[0], 0)
+
+        code, out, _ = run("sign", self.bundle, "--key", key_path, "--signer", "me")
+        self.assertEqual(code, 0, out)
+        self.assertIn("signed", out)
+
+        code, out, err = run("verify", self.bundle)
+        self.assertEqual(code, 0)
+        self.assertIn("untrusted", out)
+        self.assertIn("not trusted yet", err)
+
+        # apply with --require-signature must fail before the key is trusted
+        code, _, err = run("apply", self.bundle, "--target", self.app, "-y",
+                           "--require-signature")
+        self.assertEqual(code, 4)
+        self.assertIn("trusted key", err)
+
+        code, out, _ = run("keys", "--trust", pub, "--label", "me")
+        self.assertEqual(code, 0)
+
+        code, out, _ = run("verify", self.bundle, "--require")
+        self.assertEqual(code, 0)
+        self.assertIn("signed by me", out)
+
+        code, out, _ = run("apply", self.bundle, "--target", self.app, "-y",
+                           "--require-signature", "--json")
+        self.assertEqual(code, 0, out)
+        payload = json.loads(out)
+        self.assertEqual(payload["signature"]["state"], "valid")
+
+    def test_signature_survives_unsigned_apply(self):
+        self.make_bundle()
+        code, out, _ = run("apply", self.bundle, "--target", self.app, "--dry-run",
+                           "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["signature"]["state"], "unsigned")
+
+    def test_tampered_signed_bundle_is_refused(self):
+        import json as _json
+        self.make_bundle()
+        key_path, pub = self.keypair()
+        run("sign", self.bundle, "--key", key_path)
+        run("keys", "--trust", pub)
+        run("init", "--accept-policy")
+        with open(self.bundle, "r", encoding="utf-8") as fh:
+            data = _json.load(fh)
+        data["hunks"][0]["replace"] = "90"
+        with open(self.bundle, "w", encoding="utf-8") as fh:
+            _json.dump(data, fh)
+        code, _, err = run("apply", self.bundle, "--target", self.app, "-y")
+        self.assertEqual(code, 4)
+        self.assertIn("signature", err.lower())
+        self.assertEqual(sha256_file(self.app), sha256_file(self.app))
+
+    def test_sign_with_missing_key(self):
+        self.make_bundle()
+        code, _, err = run("sign", self.bundle, "--key", self.path("nope.key"))
+        self.assertEqual(code, 4)
+        self.assertIn("key file not found", err)
+
+    def test_keys_list_and_untrust(self):
+        _, pub = self.keypair()
+        run("keys", "--trust", pub, "--label", "z")
+        code, out, _ = run("keys", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["trust"]["keys"][0]["public_key"], pub)
+        code, out, _ = run("keys", "--untrust", pub)
+        self.assertEqual(code, 0)
+        code, out, _ = run("keys", "--json")
+        self.assertEqual(json.loads(out)["trust"]["keys"], [])
+
+    def test_keys_rejects_bad_public_key(self):
+        code, _, err = run("keys", "--trust", "00" * 31)
+        self.assertEqual(code, 4)
+        self.assertIn("64 hex", err)
+
+    def test_lock_blocks_concurrent_apply(self):
+        from surreal.lock import TargetLock
+        self.make_bundle()
+        run("init", "--accept-policy")
+        with TargetLock(self.app):
+            code, _, err = run("apply", self.bundle, "--target", self.app, "-y")
+            self.assertEqual(code, 5)
+            self.assertIn("another surreal process", err)
+        # and it works once the lock is gone
+        code, _, err = run("apply", self.bundle, "--target", self.app, "-y")
+        self.assertEqual(code, 0, err)
+
+    def test_force_unlock_breaks_a_stale_lock(self):
+        import json as _json, socket, time
+        from surreal.lock import lock_path
+        self.make_bundle()
+        run("init", "--accept-policy")
+        path = lock_path(self.app)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            _json.dump({"pid": 999999, "host": socket.gethostname(),
+                        "time_epoch": time.time(), "action": "apply"}, fh)
+        code, _, err = run("apply", self.bundle, "--target", self.app, "-y",
+                           "--force-unlock")
+        self.assertEqual(code, 0, err)
+
+    def test_max_mem_guard_refuses_huge_read(self):
+        code, _, err = run("--max-mem", "0.001", "diff", self.app, self.app2,
+                           "-o", self.bundle, "--id", "x", "--force")
+        self.assertEqual(code, 0)  # PE path never reads whole files
+        # the non-PE fallback must refuse
+        p1 = write(self.path("t1.bin"), b"a" * 65536)
+        p2 = write(self.path("t2.bin"), b"a" * 32768 + b"b" + b"a" * 32767)
+        code, _, err = run("--max-mem", "0.001", "diff", p1, p2, "-o",
+                           self.bundle, "--id", "x", "--force")
+        self.assertEqual(code, 5)
+        self.assertIn("--max-mem", err)
+
+    def test_check_reports_relocation_risk(self):
+        from helpers import build_pe
+        payload = b"\x90" * 16 + b"\0" * 8 + b"\x90" * 104
+        base = build_pe([(".text", payload, 0x60000020)],
+                        relocs=[(0x1010, 10)], with_reloc_section=True)
+        old, new = bytearray(base), bytearray(base)
+        off = 0x200 + 0x10
+        old[off:off + 8] = (0x100020).to_bytes(8, "little")
+        new[off:off + 8] = (0x100030).to_bytes(8, "little")
+        target = write(self.path("reloc_app.exe"), bytes(old))
+        modified = write(self.path("reloc_new.exe"), bytes(new))
+        code, out, _ = run("diff", target, modified, "-o", self.path("r.morph"),
+                           "--id", "org.reloc", "--json")
+        self.assertEqual(code, 0, out)
+        self.assertTrue(any("relocated" in w for w in json.loads(out)["stats"]["warnings"]))
+        code, _, err = run("check", self.path("r.morph"), "--target", target)
+        self.assertEqual(code, 3)
+        self.assertIn("allow-abs-address", err)
+        code, out, _ = run("check", self.path("r.morph"), "--target", target,
+                           "--allow-abs-address")
+        self.assertEqual(code, 0, out)
+        self.assertIn("aslr", out.lower())
+
     # -- misc --------------------------------------------------------------- #
     def test_version_and_help(self):
         code, out, _ = run("--version")

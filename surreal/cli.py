@@ -20,10 +20,10 @@ import time
 from typing import Any, Dict, List, Optional
 
 from . import FORMAT_NAME, TOOL_NAME, __version__
-from . import diffgen, patcher, policy, scanner
+from . import diffgen, keys, memguard, patcher, policy, scanner
 from .patchfile import Bundle, BundleError
 from .pe import PE, PEError
-from .util import format_hex, hexdump, human_size, sha256_file
+from .util import format_hex, hexdump, human_size, read_json, sha256_file, write_json_atomic
 
 EXIT_OK, EXIT_USAGE, EXIT_MISMATCH, EXIT_POLICY, EXIT_IO = 0, 2, 3, 4, 5
 
@@ -356,6 +356,14 @@ def cmd_info(args, console: Console) -> int:
         console.say("        + %s" % format_hex(h.replace)[:100])
         if h.comment:
             console.say("        · %s" % h.comment)
+    console.say("")
+    if bundle.signature:
+        state = ("trusted" if keys.is_trusted(policy.config_dir(),
+                                              bundle.signature.get("public_key", ""))
+                 else "NOT trusted")
+        console.kv("signature", "ed25519, %s — %s" % (bundle.signer(), state))
+    else:
+        console.kv("signature", "unsigned")
     if blocked:
         console.say("")
         console.warn("this bundle is policy-blocked: %s" % blocked)
@@ -371,7 +379,11 @@ def cmd_check(args, console: Console) -> int:
     if blocked:
         return _die(console, "policy-blocked bundle: %s" % blocked, EXIT_POLICY)
     try:
-        plan = patcher.build_plan(bundle, args.target, accept_drift=args.accept_drift)
+        plan = patcher.build_plan(
+            bundle, args.target, accept_drift=args.accept_drift,
+            require_signature=args.require_signature,
+            extra_trusted=args.trusted_key,
+            allow_abs_address=args.allow_abs_address)
     except patcher.PatchError as exc:
         return _die(console, str(exc), exc.code)
     if console.json_mode:
@@ -386,6 +398,9 @@ def cmd_check(args, console: Console) -> int:
     console.kv("hunks", len(plan.resolved))
     console.kv("checksum", "0x%08X → 0x%08X" % (plan.old_checksum or 0,
                                                 plan.new_checksum or 0))
+    if plan.relocs:
+        console.kv("aslr", "%d hunk(s) touch relocated fields (accepted)"
+                   % len({r["hunk"] for r in plan.relocs}))
     console.say("\n  run: surreal apply %s --target %s"
                 % (os.path.basename(args.bundle), os.path.basename(args.target)))
     return EXIT_OK
@@ -412,7 +427,9 @@ def cmd_apply(args, console: Console) -> int:
         result = patcher.apply_bundle(
             bundle, args.target, dry_run=args.dry_run, no_backup=args.no_backup,
             no_checksum=args.no_checksum, accept_drift=args.accept_drift,
-            keep_backups=args.keep_backups)
+            keep_backups=args.keep_backups, require_signature=args.require_signature,
+            extra_trusted=args.trusted_key, allow_abs_address=args.allow_abs_address,
+            force_unlock=args.force_unlock)
     except patcher.PatchError as exc:
         return _die(console, str(exc), exc.code)
     except OSError as exc:
@@ -422,6 +439,11 @@ def cmd_apply(args, console: Console) -> int:
         console.emit_json({"ok": True, **result})
         return EXIT_OK
     console.head(BANNER)
+    sig = result.get("signature") or {}
+    if sig.get("state") == "valid":
+        console.ok("signature %s" % sig.get("message", ""))
+    elif sig.get("message"):
+        console.warn("signature: %s" % sig["message"])
     for note in result["notes"]:
         console.say("    · %s" % note)
     for warn in result["warnings"]:
@@ -465,7 +487,7 @@ def cmd_revert(args, console: Console) -> int:
                                                os.path.basename(e.get("backup") or "-")))
         return EXIT_OK
     try:
-        result = patcher.revert(args.target)
+        result = patcher.revert(args.target, force_unlock=args.force_unlock)
     except patcher.PatchError as exc:
         return _die(console, str(exc), exc.code)
     except OSError as exc:
@@ -477,6 +499,138 @@ def cmd_revert(args, console: Console) -> int:
     console.ok("restored %s" % os.path.basename(result["target"]))
     console.kv("sha256", result["restored_sha256"])
     console.kv("reverted bundle", result.get("bundle_id") or "-")
+    return EXIT_OK
+
+
+def cmd_sign(args, console: Console) -> int:
+    from . import keys as k
+
+    try:
+        key = k.load_key_file(args.key)
+    except k.SignatureError as exc:
+        return _die(console, str(exc), EXIT_POLICY if "not found" in str(exc) else EXIT_MISMATCH)
+    try:
+        bundle = Bundle.load(args.bundle, strict=not args.lax)
+    except BundleError as exc:
+        return _die(console, str(exc), EXIT_MISMATCH)
+
+    raw = bundle.to_dict()
+    signed = k.sign_bundle(raw, bytes.fromhex(key["private_seed"]),
+                           signer=args.signer or key.get("signer", ""))
+    if args.output:
+        out = args.output
+    else:
+        out = args.bundle
+    write_json_atomic(out, signed)
+    block = signed["signature"]
+
+    if console.json_mode:
+        console.emit_json({"ok": True, "output": out, "signature": block})
+        return EXIT_OK
+    console.head(BANNER)
+    console.ok("signed %s" % out)
+    console.kv("signer", block["signer"] or "(unnamed)")
+    console.kv("public key", block["public_key"])
+    console.kv("payload sha256", block["payload_sha256"])
+    console.say("")
+    console.say("  share the public key so others can trust your bundles:")
+    console.say("    surreal keys --trust %s --label \"%s\""
+                % (block["public_key"], block["signer"] or "publisher"))
+    return EXIT_OK
+
+
+def cmd_keys(args, console: Console) -> int:
+    from . import keys as k
+
+    cfg = policy.config_dir()
+    try:
+        if args.generate:
+            record = k.generate_key_file(args.generate, signer=args.label,
+                                         force=args.force)
+            if console.json_mode:
+                console.emit_json({"ok": True, "key_file": args.generate,
+                                   "public_key": record["public_key"]})
+                return EXIT_OK
+            console.head(BANNER)
+            console.ok("wrote private key %s" % args.generate)
+            console.kv("public key", record["public_key"])
+            console.warn("this file is the private key: never commit or share it")
+            console.say("  publish only the public key above (or run: surreal keys "
+                        "--trust %s)" % record["public_key"])
+            return EXIT_OK
+        if args.trust:
+            entry = k.trust_key(cfg, args.trust, label=args.label)
+            if console.json_mode:
+                console.emit_json({"ok": True, "entry": entry, "trust_file":
+                                   k.trust_path(cfg)})
+                return EXIT_OK
+            console.head(BANNER)
+            console.ok("trusted key %s…" % entry["public_key"][:16])
+            if entry.get("label"):
+                console.kv("label", entry["label"])
+            console.kv("store", k.trust_path(cfg))
+            return EXIT_OK
+        if args.untrust:
+            removed = k.untrust_key(cfg, args.untrust)
+            if console.json_mode:
+                console.emit_json({"ok": True, "removed": removed})
+                return EXIT_OK
+            console.head(BANNER)
+            (console.ok if removed else console.warn)(
+                "removed %s…" % args.untrust[:16] if removed
+                else "key %s… was not trusted" % args.untrust[:16])
+            return EXIT_OK
+    except k.SignatureError as exc:
+        return _die(console, str(exc), EXIT_POLICY)
+
+    data = k.load_trust(cfg)
+    if console.json_mode:
+        console.emit_json({"ok": True, "config_dir": cfg, "trust": data})
+        return EXIT_OK
+    console.head(BANNER)
+    console.kv("store", k.trust_path(cfg))
+    if not data["keys"]:
+        console.say("  no trusted keys yet")
+        console.say("  add one with: surreal keys --trust <64-hex-public-key> --label \"name\"")
+    for entry in data["keys"]:
+        console.say("  %s  %s  (added %s)" % (entry["public_key"],
+                                              entry.get("label") or "-",
+                                              entry.get("added_utc", "?")))
+    return EXIT_OK
+
+
+def cmd_verify(args, console: Console) -> int:
+    from . import keys as k
+
+    try:
+        bundle = Bundle.load(args.bundle, strict=not args.lax)
+    except BundleError as exc:
+        return _die(console, str(exc), EXIT_MISMATCH)
+    raw = bundle.to_dict()
+    try:
+        state, message, trusted = k.check_bundle_signature(
+            raw, policy.config_dir(), require=args.require,
+            extra_trusted=args.trusted_key)
+    except k.SignatureError as exc:
+        if console.json_mode:
+            console.emit_json({"ok": False, "state": "invalid", "error": str(exc)})
+        return _die(console, str(exc), EXIT_POLICY)
+    sig = raw.get("signature") or {}
+    if console.json_mode:
+        console.emit_json({"ok": True, "state": state, "message": message,
+                           "public_key": sig.get("public_key"),
+                           "signer": sig.get("signer"),
+                           "payload_sha256": sig.get("payload_sha256")})
+        return EXIT_OK
+    console.head(BANNER)
+    icon = {"valid": console.ok, "unsigned": console.warn,
+            "untrusted": console.warn}.get(state, console.warn)
+    console.kv("state", state)
+    icon(message)
+    if sig:
+        console.kv("signer", sig.get("signer") or "(unnamed)")
+        console.kv("public key", sig.get("public_key", ""))
+        console.kv("signed", sig.get("signed_utc", "?"))
     return EXIT_OK
 
 
@@ -557,6 +711,8 @@ def build_parser() -> argparse.ArgumentParser:
                    version="%s %s" % (TOOL_NAME, __version__))
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("-q", "--quiet", action="store_true", help="suppress chatter")
+    p.add_argument("--max-mem", type=float, default=256.0, metavar="MB",
+                   help="memory ceiling for whole-file reads (default 256)")
     sub = p.add_subparsers(dest="command", metavar="<command>")
 
     def add(name, help_text):
@@ -564,6 +720,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                         help="machine-readable output")
         sp.add_argument("-q", "--quiet", action="store_true", default=argparse.SUPPRESS)
+        sp.add_argument("--max-mem", type=float, default=argparse.SUPPRESS, metavar="MB",
+                        help="memory ceiling in MB (default 256)")
         return sp
 
     sp = add("init", "read the usage policy and record your acknowledgement")
@@ -621,6 +779,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--target", required=True)
     sp.add_argument("--accept-drift", action="store_true",
                     help="allow size/hash drift from the authored build")
+    sp.add_argument("--require-signature", action="store_true",
+                    help="fail unless signed by a trusted key")
+    sp.add_argument("--trusted-key", action="append", metavar="HEX", default=[],
+                    help="trust this public key for this run (repeatable)")
+    sp.add_argument("--allow-abs-address", action="store_true",
+                    help="accept hunks that overwrite relocatable absolute fields")
     sp.add_argument("--lax", action="store_true")
     sp.set_defaults(func=cmd_check)
 
@@ -633,6 +797,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-checksum", action="store_true",
                     help="leave the PE checksum stale")
     sp.add_argument("--accept-drift", action="store_true")
+    sp.add_argument("--require-signature", action="store_true",
+                    help="fail unless signed by a trusted key")
+    sp.add_argument("--trusted-key", action="append", metavar="HEX", default=[],
+                    help="trust this public key for this run (repeatable)")
+    sp.add_argument("--allow-abs-address", action="store_true",
+                    help="accept hunks that overwrite relocatable absolute fields")
+    sp.add_argument("--force-unlock", action="store_true",
+                    help="break a lock left by a crashed run")
     sp.add_argument("--lax", action="store_true")
     sp.add_argument("--keep-backups", type=int, default=3,
                     help="prune older backups, keep N (0 = keep all)")
@@ -640,8 +812,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add("revert", "restore the backup created by the last apply")
     sp.add_argument("target")
+    sp.add_argument("--force-unlock", action="store_true",
+                    help="break a lock left by a crashed run")
     sp.add_argument("--list", action="store_true", help="show the journal")
     sp.set_defaults(func=cmd_revert)
+
+    sp = add("sign", "sign a bundle with an ed25519 key (tamper-evident patches)")
+    sp.add_argument("bundle")
+    sp.add_argument("--key", required=True, help="surreal.key file (created by `keys --generate`)")
+    sp.add_argument("-o", "--output", default="", help="write here (default: in place)")
+    sp.add_argument("--signer", default="", help="signer name shown to users")
+    sp.add_argument("--lax", action="store_true")
+    sp.set_defaults(func=cmd_sign)
+
+    sp = add("keys", "manage signing keys and the trusted-key store")
+    sp.add_argument("--generate", metavar="PATH", help="create a new key pair file")
+    sp.add_argument("--trust", metavar="PUBHEX", help="trust a public key")
+    sp.add_argument("--untrust", metavar="PUBHEX", help="forget a public key")
+    sp.add_argument("--label", default="", help="name for the key")
+    sp.add_argument("--force", action="store_true", help="overwrite an existing key file")
+    sp.set_defaults(func=cmd_keys)
+
+    sp = add("verify", "verify a bundle's ed25519 signature")
+    sp.add_argument("bundle")
+    sp.add_argument("--require", action="store_true",
+                    help="fail if unsigned or signed by an untrusted key")
+    sp.add_argument("--trusted-key", action="append", metavar="HEX", default=[])
+    sp.add_argument("--lax", action="store_true")
+    sp.set_defaults(func=cmd_verify)
 
     sp = add("demo", "write a synthetic demo app + patch bundle to a directory")
     sp.add_argument("--out", default="surreal-demo", help="output directory")
@@ -664,6 +862,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     console = Console(json_mode=getattr(args, "json", False),
                       quiet=getattr(args, "quiet", False))
+    memguard.set_default(getattr(args, "max_mem", None))
     if not getattr(args, "func", None):
         parser.print_help()
         return EXIT_USAGE
@@ -672,6 +871,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     except KeyboardInterrupt:
         console.err("interrupted")
         return 130
+    except memguard.MemoryLimitError as exc:
+        return _die(console, str(exc), EXIT_IO)
     except BrokenPipeError:  # e.g. `surreal inspect x.exe | head`
         return EXIT_OK
 

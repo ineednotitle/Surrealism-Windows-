@@ -61,7 +61,7 @@ $ python -m surreal demo
   hunks:  2 (all anchored: 2)
 
 $ python -m surreal inspect surreal-demo/demo_app.exe
-surreal 0.1.0 — Surrealism Window · windows patch workbench
+surreal 0.2.0 — Surrealism Window · windows patch workbench
   …\surreal-demo\demo_app.exe  (2.0 KiB)
   sha256 4d51cec411ac4bf2856d007044be52d8da0713e4abe227f02244193c66251408
 
@@ -98,8 +98,11 @@ $ python -m surreal check surreal-demo/demo-shorten-nag.morph `
 | `diff old new -o x.morph --id …` | builds a patch bundle from two builds (this is the "patch creator") |
 | `info <morph>` | human + `--json` view of a bundle: anchors, hunks, policy flags |
 | `check <morph> --target <exe>` | full preflight, writes nothing, exit code tells you if it would work |
-| `apply <morph> --target <exe>` | backup → verify → patch a copy → recompute checksum → atomic swap → journal |
+| `apply <morph> --target <exe>` | lock → backup → verify → patch a copy → recompute checksum → atomic swap → journal |
 | `revert <exe>` | restore the last backup (`--list` shows the journal) |
+| `sign <morph> --key me.key` | sign a bundle (ed25519); makes it tamper-evident |
+| `verify <morph> [--require]` | check the signature and whether the key is trusted |
+| `keys --generate/--trust/--untrust` | manage your signing key and trusted-key store |
 | `demo` | generate a synthetic PE + bundle to practise on |
 | `selftest` | runs build→diff→check→apply→revert on a generated PE and prints PASS/FAIL |
 
@@ -173,6 +176,27 @@ load bundle → policy gate → mmap target
 commitment first. `surreal revert` restores the backup and refuses if the file
 changed since it was patched.
 
+### Identity, concurrency and ASLR (v0.2)
+
+* **Signed bundles.** `surreal sign` produces an ed25519 signature over the
+  bundle's canonical JSON (pure-Python RFC 8032, validation against the RFC test
+  vectors in CI). `surreal verify` reports `unsigned` / `untrusted` / `valid`;
+  any tampering is fatal. `apply --require-signature` refuses anything not
+  signed by a key you trust. `--trusted-key HEX` admits a key for one run (CI
+  friendly). Details: [`docs/SIGNING.md`](docs/SIGNING.md).
+* **One writer at a time.** `<dir>\.surreal\lock` is taken with
+  `O_CREAT|O_EXCL` for every apply/revert; a crashed run's lock (dead PID, other
+  host, or older than 15 min) is reclaimed automatically. `--force-unlock` is
+  there for the day it guesses wrong.
+* **ASLR safety.** If a hunk overwrites a field covered by a base relocation
+  (`.reloc`), the patched image would only be correct at the base it was tested
+  at. Such hunks are **refused** with the offending RVA and relocation type; the
+  diff generator warns about them at authoring time; `--allow-abs-address`
+  proceeds anyway once you have verified rebasing.
+* **Memory ceiling.** `--max-mem MB` (default 256) bounds every whole-file read
+  (`--force` non-PE diffs, fallbacks) *before* allocating, so surreal fails with
+  a clear message instead of swapping a 4 GB machine to death.
+
 ## Low-end by design (4 GB RAM, 2 cores, HDD)
 
 | Concern | How |
@@ -236,8 +260,8 @@ contributor is allowed to modify.
 
 | Milestone | Scope |
 |---|---|
-| **M0 (this repo)** | PE parser, scanner, diff→bundle, apply/revert/journal, policy gate, CI, exe build |
-| M1 | section-aware diffs, tamper-evident bundles (ed25519 signatures), bundle registry file |
+| **M0 (shipped)** | PE parser, scanner, diff→bundle, apply/revert/journal, policy gate, CI, exe build |
+| **M1 (shipped, v0.2)** | ed25519-signed bundles + trusted-key store, crash-safe apply lock, ASLR/relocation safety checks, `--max-mem` guard |
 | M2 | size-changing patches (append section / extend overlay) with explicit opt-in |
 | M3 | multi-file "vault" bundles (apply N files atomically), patch dependencies |
 | M4 | `--tui` and `apply --repo` for curated bundle collections |

@@ -306,15 +306,24 @@ surreal init | inspect | scan | diff | info | check | apply | revert | demo | se
 * CI: tests on Windows/Linux/macOS × py3.9/3.12, a "no network / no subprocess"
   source grep, PyInstaller build of `surreal.exe`, artifact + release upload.
 
-Deliberately deferred to later milestones: `--max-mem`, ed25519 bundle
-signatures, size-changing patches, multi-file vaults, TUI, repo client.
+### M1 (shipped in v0.2)
+
+| Feature | Where | Guard-rail |
+|---|---|---|
+| ed25519 signing/verification | `surreal/keys.py` | RFC 8032 vectors in tests; invalid signature is always fatal |
+| trusted-key store | `%APPDATA%\surreal\trusted_keys.json` | `verify --require`, `apply --require-signature`, `--trusted-key` for CI |
+| crash-safe apply lock | `surreal/lock.py` | stale locks (dead pid / foreign host / >15 min) reclaimed; `--force-unlock` escape hatch |
+| ASLR / relocation safety | `surreal/reloc.py` | refuses writes to relocated absolute fields; `--allow-abs-address` opt-in; authoring-time warning |
+| memory ceiling | `surreal/memguard.py` | `--max-mem` (default 256 MB) refuses oversized reads *before* allocating |
+
+Still deferred: size-changing patches, multi-file vaults, TUI, repo client.
 
 ## 7. Milestones
 
 | M | Scope | Done when |
 |---|---|---|
 | **M0 (this PR)** | plan, PE parser, scanner, diff→bundle, apply/revert/journal, policy gate, docs, CI, exe build | `python -m unittest` green on Windows & Linux; a bundle round-trips on a synthetic PE |
-| M1 | section-aware diffs, reloc-aware wildcards, `.morph` signature (ed25519 via `cryptography` optional) | bundles are tamper-evident |
+| M1 | ed25519 `.morph` signatures (pure-Python, no dependency), trusted-key store, apply lock, ASLR/relocation checks, `--max-mem` | bundles are tamper-evident and safe on relocatable images — **done (v0.2)** |
 | M2 | size-changing patches (append section, extend overlay), manifest/vault for multi-file apps | patch a 3-file app atomically |
 | M3 | optional patch scripting (sandboxed, no shell), patch dependencies/conflicts | community patch repo works |
 | M4 | TUI (`--tui`) + patch repository client (`apply --repo repo.json`) | one-command "apply all trusted bundles" |

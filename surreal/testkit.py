@@ -32,11 +32,23 @@ def build_pe(sections: List[Tuple[str, bytes, int]], is_64: bool = True,
              entrypoint_rva: int = 0x1000, machine: Optional[int] = None,
              subsystem: int = 3, timestamp: int = 0x5F000000,
              image_base: Optional[int] = None, checksum: bool = True,
-             dll: bool = False) -> bytes:
+             dll: bool = False,
+             relocs: Optional[List[Tuple[int, int]]] = None,
+             with_reloc_section: Optional[bool] = None) -> bytes:
     """Return a syntactically valid PE image.
 
     ``sections`` is a list of ``(name, data, characteristics)``.
+    ``relocs`` is a list of ``(rva, type)`` entries; when given (or when
+    ``with_reloc_section`` is true) a real ``.reloc`` section and data-directory
+    entry are emitted.
     """
+    reloc_blob = b""
+    sections = list(sections)
+    if relocs or with_reloc_section:
+        reloc_blob = _build_reloc_blob(relocs or [],
+                                       base_rva=0x1000 * (len(sections) + 1))
+        sections.append((".reloc", reloc_blob, RDATA_CHARS))
+
     machine = machine if machine is not None else (0x8664 if is_64 else 0x14C)
     image_base = image_base if image_base is not None else (0x140000000 if is_64 else 0x400000)
     opt_size = 0xF0 if is_64 else 0xE0
@@ -96,6 +108,10 @@ def build_pe(sections: List[Tuple[str, bytes, int]], is_64: bool = True,
         struct.pack_into("<I", opt, 92, 16)
         struct.pack_into("<H", opt, 0x46, 0x0100)
     struct.pack_into("<I", opt, 0x38, 0x100000)   # SizeOfStackReserve
+    if reloc_blob:
+        dirs_off = (112 if is_64 else 96) + 5 * 8
+        struct.pack_into("<II", opt, dirs_off,
+                         0x1000 * len(sections), len(reloc_blob))
     headers += bytes(opt) + sec_headers
 
     image = bytearray(_pad(bytes(headers), FILE_ALIGN))
@@ -109,6 +125,25 @@ def build_pe(sections: List[Tuple[str, bytes, int]], is_64: bool = True,
         csum_off = fat_off + 24 + 64
         out = out[:csum_off] + struct.pack("<I", csum) + out[csum_off + 4:]
     return out
+
+
+def _build_reloc_blob(entries: List[Tuple[int, int]], base_rva: int) -> bytes:
+    """Group ``(rva, type)`` entries into relocation blocks, 4-byte aligned."""
+    if not entries:
+        return b"\0\0\0\0\0\0\0\0"
+    pages: Dict[int, List[int]] = {}
+    for rva, typ in entries:
+        pages.setdefault(rva & 0xFFFFF000, []).append(((typ << 12) | (rva & 0xFFF)))
+    out = bytearray()
+    for page in sorted(pages):
+        words = pages[page]
+        while len(words) % 2:            # pad to a 4-byte boundary
+            words.append(0)              # type 0 == ABOLUTE, ignored
+        size = 8 + len(words) * 2
+        out += struct.pack("<II", page, size)
+        for word in words:
+            out += struct.pack("<H", word)
+    return bytes(out)
 
 
 def _pe_checksum(data: bytes) -> int:
@@ -285,6 +320,57 @@ def run_selftest(keep: bool = False, workdir: Optional[str] = None,
             return "journal: " + " → ".join(actions)
 
         step("journal records both actions", _journal)
+
+        def _sign_and_verify():
+            from . import keys
+
+            key_path = os.path.join(base, "selftest.key")
+            record = keys.generate_key_file(key_path, signer="selftest")
+            bundle = Bundle.load(bundle_path)
+            raw = keys.sign_bundle(bundle.to_dict(),
+                                   bytes.fromhex(record["private_seed"]),
+                                   signer="selftest")
+            import json as _json
+
+            with open(bundle_path, "w", encoding="utf-8") as fh:
+                _json.dump(raw, fh, indent=2)
+            block = keys.verify_bundle(raw)
+            if block["public_key"] != record["public_key"]:
+                raise AssertionError("signature key mismatch")
+            return "ed25519 signature verifies (%s…)" % block["public_key"][:12]
+
+        step("sign + verify a bundle", _sign_and_verify)
+
+        def _tamper_detected():
+            import json as _json
+
+            from . import keys
+
+            with open(bundle_path, "r", encoding="utf-8") as fh:
+                raw = _json.load(fh)
+            raw["hunks"][0]["replace"] = "90"
+            try:
+                keys.verify_bundle(raw)
+            except keys.SignatureError:
+                return "edited bundle rejected"
+            raise AssertionError("tampered bundle verified!")
+
+        step("tampered bundle is rejected", _tamper_detected)
+
+        def _lock():
+            from .lock import LockError, TargetLock
+
+            lock = TargetLock(old, action="selftest").acquire()
+            try:
+                try:
+                    TargetLock(old, action="selftest").acquire()
+                except LockError:
+                    return "second holder refused"
+                raise AssertionError("lock did not exclude a second holder")
+            finally:
+                lock.release()
+
+        step("apply lock excludes a second holder", _lock)
 
         def _bad_bundle():
             bad = os.path.join(base, "bad.morph")

@@ -17,7 +17,7 @@ from .util import format_hex, parse_hex_bytes, parse_hex_tokens, read_json, writ
 ALLOWED_KEYS = {
     "format", "format_version", "id", "name", "version", "description", "notes",
     "created_utc", "author", "homepage", "license", "tool", "target", "anchors",
-    "hunks", "policy",
+    "hunks", "policy", "signature",
 }
 ALLOWED_TARGET_KEYS = {"filename", "size", "sha256", "pe", "authenticode", "sections"}
 ALLOWED_HUNK_KEYS = {"anchor", "delta", "section", "rva", "offset", "expect",
@@ -127,6 +127,7 @@ class Bundle:
     created_utc: str = ""
     tool: Dict[str, str] = field(default_factory=dict)
     policy: Policy = field(default_factory=Policy)
+    signature: Optional[Dict[str, Any]] = None
     path: Optional[str] = None
     strict: bool = True
 
@@ -158,6 +159,8 @@ class Bundle:
             out["anchors"] = [a.to_dict() for a in self.anchors]
         out["hunks"] = [h.to_dict() for h in self.hunks]
         out["policy"] = self.policy.to_dict()
+        if self.signature:
+            out["signature"] = self.signature
         return out
 
     def save(self, path: str) -> None:
@@ -289,6 +292,7 @@ class Bundle:
             created_utc=str(raw.get("created_utc") or ""),
             tool=raw.get("tool") or {},
             policy=policy,
+            signature=raw.get("signature"),
             strict=strict,
         )
 
@@ -304,6 +308,14 @@ class Bundle:
             if word in haystack:
                 return "bundle description advertises %r" % word
         return None
+
+    def signer(self) -> str:
+        """Human label for the signature block, or an empty string."""
+        if not self.signature:
+            return ""
+        who = self.signature.get("signer") or "(unnamed)"
+        key = (self.signature.get("public_key") or "")[:16]
+        return "%s [%s…]" % (who, key)
 
     def summary(self) -> str:
         return "%s (%s) — %d hunk(s), target %s" % (
