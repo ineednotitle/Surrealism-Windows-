@@ -325,6 +325,18 @@ The safety story is a proof, not a promise:
 * A bundle may contain exactly one size-changing hunk, and never together with
   `--accept-drift`: these ops are positional, so identity is the whole safety net.
 
+## What CI proves on every push
+
+| Job | Where | What it does |
+|---|---|---|
+| `test` | Windows, macOS, Linux · Python 3.9 + 3.12 | 294 unit tests, `surreal selftest` (17 steps), `tools/ci_smoke.py` (11 end-to-end scenarios), `tools/bench.py` budget |
+| `static checks` | Linux | every module compiles; **no network imports** and **no shell-execution calls** anywhere under `surreal/`; no private keys committed |
+| `build surreal.exe` | Windows | PyInstaller one-file build, then the frozen binary runs `--version`, `selftest`, demo/check/sign/verify/apply/revert, `collection list`, `repo index`/`list` and a piped `tui` |
+
+The Windows legs are not an afterthought: the frozen-exe path, console encodings
+and the resource-free RSS profiling were all found and fixed there. `surreal` is
+pure standard library, so the same code runs from source and from the `.exe`.
+
 ## Try it on your own binary (read-only)
 
 Before you trust a patch, prove the pipeline on a binary you have lying around.

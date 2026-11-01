@@ -435,6 +435,20 @@ Next: sandboxed patch scripting, cross-collection dependency checks.
 | M3 | multi-file vaults and patch dependencies/conflicts (**done v0.5**), optional patch scripting (sandboxed, no shell) | community patch repo works |
 | M4 | TUI + patch repository client (**`surreal tui` and `repo index/list/show/apply` done v0.5**) | one-command "apply all trusted bundles" |
 
+## 8b. Where v0.5 stands
+
+Everything in §7 up to and including M4 is shipped: layout changes that are
+provably safe (overlay growth, last-section growth, section appending), transactions
+over one file and over a whole application directory, dependencies/conflicts as
+data, a local repo index, an interactive picker, and a Windows frozen build that
+survives its own smoke test. 294 tests plus 17 selftest steps and 11 CI scenarios
+run on Windows, macOS and Linux.
+
+Deliberately not shipped: patch scripting (a `.morph` stays data), mid-image
+section moves, relocation rewriting, and anything that touches running processes.
+Those need a linker, a debugger or a sandbox, and shipping half of one is how
+patchers corrupt binaries.
+
 ## 8. Risks & mitigations
 
 | Risk | Mitigation |
