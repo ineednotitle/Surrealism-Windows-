@@ -48,6 +48,21 @@ bundle written for an older version keeps loading.
   `a` to apply the selection as one transaction, `r` to revert, `q` to quit. Plain
   line input (no curses), so it works frozen, over SSH and when piped.
 
+### Windows fixes (found by the Windows CI legs, not guesswork)
+* The frozen `surreal.exe` used to die on `--version`: PyInstaller was pointed at
+  `surreal/cli.py`, which breaks the package's relative imports at startup. It now
+  freezes the `surreal.py` shim, and `surreal.collection`, `surreal.repo` and
+  `surreal.surgery` are in the hidden imports (a frozen build previously lost
+  them).
+* A console that cannot encode the UI glyphs (cp1252/cp437) no longer crashes a
+  run: the console detects the encoding and falls back to `OK` / `XX` / `->`.
+* `resource` and `os.uname()` were imported unconditionally by the perf tests, so
+  the whole Windows test leg failed; peak-RSS measurement now lives in
+  `memguard.peak_rss_mb()` with a Windows psapi path and an explicit "unknown".
+* `surreal/lock.py` no longer imports `socket` (it only wanted a hostname) — the
+  "no network modules" lint rule now holds without an exception.
+* The bench harness prints ASCII only and reports an unknown RSS as `n/a`.
+
 ### Other
 * `collection apply --dry-run` (single-target and vault).
 * Windows lock/permission errors during the swap now explain what to do instead
