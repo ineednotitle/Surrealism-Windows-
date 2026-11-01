@@ -34,6 +34,28 @@ A size-changing bundle: it appends 88 bytes of overlay after the last section
 section-table or RVA edits. Its inverse (`op: "truncate"`) removes the same bytes
 again — build it with `surreal diff grown.exe demo_app.exe -o remove.morph`.
 
+## `demo-extend-section.morph`
+
+A layout-changing bundle: it appends 60 bytes to the last section (`.data`) and
+rewrites that section's `VirtualSize`/`SizeOfRawData` plus the image's
+`SizeOfImage`. The file grows by one `FileAlignment` unit (512 bytes) because
+section raw data is always mapped in whole pages.
+
+```bash
+python -m surreal demo --out /tmp/demo
+python -m surreal check examples/demo-extend-section.morph --target /tmp/demo/demo_app.exe
+python -m surreal init --accept-policy
+python -m surreal apply examples/demo-extend-section.morph --target /tmp/demo/demo_app.exe -y
+python -m surreal inspect /tmp/demo/demo_app.exe     # .data raw size 0x200 → 0x400
+python -m surreal revert /tmp/demo/demo_app.exe      # size restored too
+```
+
+Only the **last** section can be grown this way, which is why no RVA fixups are
+needed: nothing after it moves. A bundle may contain exactly one size/layout
+hunk and refuses `--accept-drift`. `op: "add-section"` is the same machinery with
+a new 40-byte section header instead of a resize — it needs free space before the
+first section's raw data (see `docs/PATCH_FORMAT.md`).
+
 ## `surreal-collection.json`
 
 A two-patch transaction over the same generated app:
@@ -47,7 +69,7 @@ python -m surreal revert /tmp/demo/demo_app.exe
 ```
 
 Collections refuse size-changing members (see `docs/COLLECTIONS.md`), which is
-why the overlay example is not part of the set.
+why neither the overlay example nor the surgery example is part of the set.
 
 ## Adding your own
 

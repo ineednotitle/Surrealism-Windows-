@@ -350,6 +350,12 @@ def cmd_info(args, console: Console) -> int:
             where.append("end of file (append +%d bytes)" % len(h.replace))
         elif h.op == "truncate":
             where.append("end of file (truncate -%d bytes)" % len(h.expect))
+        elif h.op == "extend-section":
+            where.append("header surgery: grow %s (+%d bytes)"
+                         % (h.section, len(h.replace)))
+        elif h.op == "add-section":
+            where.append("header surgery: add %s (+%d bytes)"
+                         % (h.name, len(h.replace)))
         if h.anchor is not None:
             where.append("anchor %d+%d" % (h.anchor, h.delta))
         if h.section and h.rva is not None:
@@ -365,6 +371,18 @@ def cmd_info(args, console: Console) -> int:
                 "%02X" % v if v is not None else "??" for v in h.expect)[:100])
         if h.replace:
             console.say("        + %s" % format_hex(h.replace)[:100])
+        if h.op in ("extend-section", "add-section"):
+            detail = []
+            if h.raw_size_before is not None:
+                detail.append("raw_size_before 0x%X" % h.raw_size_before)
+            if h.virtual_size_after is not None:
+                detail.append("virtual_size_after 0x%X" % h.virtual_size_after)
+            if h.characteristics is not None:
+                detail.append("characteristics 0x%08X" % h.characteristics)
+            if h.rva is not None:
+                detail.append("rva 0x%X" % h.rva)
+            if detail:
+                console.say("        · " + ", ".join(detail))
         if h.comment:
             console.say("        · %s" % h.comment)
     console.say("")
@@ -414,8 +432,13 @@ def cmd_check(args, console: Console) -> int:
                                                     plan.new_checksum))
     size_ops = [r for r in plan.resolved if r.op != "patch"]
     for r in size_ops:
-        console.kv("size change", "%s %d bytes at end of file"
-                   % (r.op, len(r.replace) if r.op == "append" else r.length))
+        if r.op in ("extend-section", "add-section") and r.surgery is not None:
+            console.kv("layout change", "%s %s → %d bytes, SizeOfImage 0x%X"
+                       % (r.op, r.surgery.section_name, r.surgery.file_size_after,
+                          r.surgery.image_size_after))
+        else:
+            console.kv("size change", "%s %d bytes at end of file"
+                       % (r.op, len(r.replace) if r.op == "append" else r.length))
     if plan.relocs:
         console.kv("aslr", "%d hunk(s) touch relocated fields (accepted)"
                    % len({r["hunk"] for r in plan.relocs}))

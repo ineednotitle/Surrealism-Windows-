@@ -10,7 +10,7 @@
   "author": "surreal demo",
   "tool": {
     "name": "surreal",
-    "version": "0.2.0"
+    "version": "0.5.0"
   },
   "target": {
     "filename": "demo_app.exe",

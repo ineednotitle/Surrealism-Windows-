@@ -10,7 +10,7 @@
   "author": "surreal demo",
   "tool": {
     "name": "surreal",
-    "version": "0.2.0"
+    "version": "0.5.0"
   },
   "target": {
     "filename": "demo_app.exe",
@@ -48,7 +48,6 @@
   "hunks": [
     {
       "op": "append",
-      "expect": "",
       "replace": "0D 0A 5B 53 55 52 52 45 41 4C 2D 44 45 4D 4F 5D 0D 0A 6F 76 65 72 6C 61 79 3D 61 70 70 65 6E 64 65 64 2D 62 79 2D 73 75 72 72 65 61 6C 0D 0A 70 75 72 70 6F 73 65 3D 64 65 6D 6F 6E 73 74 72 61 74 65 2D 73 69 7A 65 2D 63 68 61 6E 67 69 6E 67 2D 70 61 74 63 68 0D 0A",
       "comment": "append 88 bytes after the last section (overlay)"
     }

@@ -397,6 +397,47 @@ def run_selftest(keep: bool = False, workdir: Optional[str] = None,
 
         step("overlay size change (append + revert)", _overlay_append)
 
+        def _extend_section():
+            import struct
+
+            from . import surgery
+
+            grown = os.path.join(base_dir, "grown_section.exe")
+            shutil.copyfile(old, grown)
+            pe = PE.open(grown)
+            try:
+                plan = surgery.plan_extend_section(pe, pe.sections[-1].name,
+                                                   b"SELFTEST-EXTRA-SECTION-DATA")
+            finally:
+                pe.close()
+            with open(grown, "r+b") as fh:
+                for offset, data in plan.writes:
+                    fh.seek(offset)
+                    fh.write(data)
+                fh.seek(0, os.SEEK_END)
+                fh.write(plan.payload)
+            with PE.open(grown) as after:
+                csum, skip = after.compute_checksum(), after._checksum_offset
+            with open(grown, "r+b") as fh:
+                fh.seek(skip)
+                fh.write(struct.pack("<I", csum))
+
+            eb, _ = diffgen.build_bundle(old, grown, "org.surreal.selftest.extend",
+                                         "extend-section")
+            if [h.op for h in eb.hunks] != ["extend-section"]:
+                raise AssertionError("generator did not produce extend-section: %r"
+                                     % [h.op for h in eb.hunks])
+            path = os.path.join(base_dir, "extend.morph")
+            eb.save(path)
+            patcher.apply_bundle(Bundle.load(path), old)
+            with open(old, "rb") as a, open(grown, "rb") as b:
+                if a.read() != b.read():
+                    raise AssertionError("extend-section did not reproduce the build")
+            patcher.revert(old)
+            return "extend-section reproduces the reference build"
+
+        step("image surgery (extend-section)", _extend_section)
+
         def _collection():
             import json as _json
 

@@ -9,13 +9,19 @@ third-party binary and no licensing question is involved.
 
 import os
 import shutil
+import struct
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from surreal import surgery  # noqa: E402
 from surreal.diffgen import build_bundle  # noqa: E402
+from surreal.pe import PE  # noqa: E402
 from surreal.testkit import make_pe_pair, sample_app  # noqa: E402
+
+EXTRA_SECTION_BYTES = (b"\r\n[SURREAL-DEMO]\r\n"
+                       b"payload=grown-in-place-by-header-surgery\r\n")
 
 EXAMPLES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         "examples")
@@ -88,6 +94,46 @@ def main() -> int:
             out3 = os.path.join(EXAMPLES, "demo-blank-version.morph")
             vb.save(out3)
             print("wrote %s (%d hunk(s))" % (out3, len(vb.hunks)))
+
+        # a header-surgery bundle: grow the last section in place
+        grown_section = os.path.join(tmp, "demo_app_extended.exe")
+        shutil.copyfile(old, grown_section)
+        pe = PE.open(grown_section)
+        try:
+            plan = surgery.plan_extend_section(pe, pe.sections[-1].name,
+                                               EXTRA_SECTION_BYTES)
+        finally:
+            pe.close()
+        with open(grown_section, "r+b") as fh:
+            for offset, data in plan.writes:
+                fh.seek(offset)
+                fh.write(data)
+            fh.seek(0, os.SEEK_END)
+            fh.write(plan.payload)
+        with PE.open(grown_section) as after:
+            csum, skip = after.compute_checksum(), after._checksum_offset
+        with open(grown_section, "r+b") as fh:
+            fh.seek(skip)
+            fh.write(struct.pack("<I", csum))
+        sb, _ = build_bundle(
+            old, grown_section,
+            bundle_id="org.surreal.demo.extend-section",
+            name="Demo: grow the last section",
+            author="surreal demo",
+            description=("Appends %d bytes to the last section and rewrites "
+                         "VirtualSize, SizeOfRawData and SizeOfImage. This is the "
+                         "header-surgery path: still declarative, still verified by "
+                         "a replay during generation." % len(EXTRA_SECTION_BYTES)),
+            notes=("Practice bundle for the generated demo_app.exe. Requires the "
+                   "exact old build; refuses overlays and non-last sections."),
+            created_utc="2026-11-01T00:00:00Z",
+        )
+        out4 = os.path.join(EXAMPLES, "demo-extend-section.morph")
+        sb.save(out4)
+        print("wrote %s (%d hunk, file %+d bytes, %s VirtualSize 0x%X)"
+              % (out4, len(sb.hunks),
+                 os.path.getsize(grown_section) - os.path.getsize(old),
+                 sb.hunks[0].section, sb.hunks[0].virtual_size_after or 0))
 
         # a collection applying two size-preserving bundles in one transaction
         manifest = {

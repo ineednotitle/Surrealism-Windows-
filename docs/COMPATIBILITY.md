@@ -9,13 +9,31 @@
 | DOS-only `.exe` | rejected (`not a PE file`) |
 | .NET assemblies | parsed; `dotnet: yes` shown. Byte edits work, but metadata/RVA patching of IL is out of scope in v1 |
 | DLLs, OCXs, CPL, SCR, SYS | parsed (`.exe` is just the common name; `--target` accepts any PE) |
-| Files with overlay / installer payloads | parsed, overlay reported; edits inside the overlay are allowed but flagged |
+| Files with overlay / installer payloads | parsed, overlay reported; edits inside the overlay are allowed but flagged. An overlay blocks `extend-section`/`add-section` (the image is not last in the file) |
 | Authenticode-signed binaries | parsed, `authenticode: signed` shown, loud warning before write (signature becomes invalid) |
 | Truncated / corrupt headers | rejected with a specific message, never "best effort" |
 
+## Layout changes (v0.5)
+
+| Change | Support |
+|---|---|
+| grow the overlay (`op: append`) | yes |
+| shrink the overlay (`op: truncate`) | yes |
+| grow the **last** section (`op: extend-section`) | yes — rewrites `VirtualSize`, `SizeOfRawData`, `SizeOfImage` |
+| add a section at the end (`op: add-section`) | yes — needs ≥ 40 bytes of header slack |
+| resize / remove a section that is not last | refused (would move every following RVA) |
+| `virtual_size_after` below the current `VirtualSize` | refused (that is a shrink, not a grow) |
+| any layout change with `--accept-drift` | refused |
+
+Every layout change is proven twice: `diff` replays the hunk through the applier
+and compares byte-for-byte, and the patcher re-parses the written temp file
+(section count, `SizeOfImage`, file size, section bounds, checksum) before the
+atomic rename.
+
 ## What the tool will not do (v1)
 
-* Resize files, add sections, extend the overlay, or relocate RVAs.
+* Resize a section that is not the last one, insert a section in the middle,
+  remove a section, rewrite relocations, or change the entry point.
 * Unpack or decrypt protected images. If `.vmp0`, `.themida`, `.enigma1`,
   `UPX0/UPX1` or a >7.2 bits/byte section is detected, `inspect` tells you and
   points at the vendor's own unpacking path.

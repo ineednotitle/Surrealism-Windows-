@@ -66,7 +66,7 @@ exactly the case anchors exist to survive.
 |---|---|
 | `expect` | **required.** Original bytes; same length as `replace`; may contain `??` wildcards (those bytes are not compared). Never omit it — the loader rejects bundles without expectations, so no bundle can patch blind. |
 | `replace` | **required.** Fixed bytes, no wildcards, non-empty. |
-| `op` | `"patch"` (default), `"append"` or `"truncate"` — see below |
+| `op` | `"patch"` (default), `"append"`, `"truncate"`, `"extend-section"` or `"add-section"` — see below |
 | `anchor` + `delta` | hunk starts at `anchor_match_offset + delta` |
 | `section` + `rva` | hunk starts at the file offset of `rva` inside `section` |
 | `offset` | absolute file offset (last resort, and for non-PE `--force` diffs) |
@@ -93,33 +93,99 @@ applied only if every non-wildcard byte matches.
 Resolved hunk ranges must not overlap; overlapping hunks abort the whole apply
 (no partial writes, no "last one wins").
 
-### Size changes: `op`
+### Size and layout changes: `op`
 
-Format v1 understands three operations:
+Format v1 understands five operations:
 
 | `op` | `expect` | `replace` | Address | Meaning |
 |---|---|---|---|---|
 | `patch` (default) | required, same length as `replace` | required, non-empty | anchor / section+rva / offset | in-place overwrite |
 | `append` | must be empty | the bytes to append | end of file | grow the overlay |
 | `truncate` | the trailing bytes to remove | must be empty | end of file | shrink the overlay |
+| `extend-section` | must be empty | the bytes to append | header surgery | grow the **last** section in place |
+| `add-section` | must be empty | the bytes of the new section | header surgery | append a section header |
 
-**Why only the overlay?** Growing or shrinking inside a mapped region would
-change `SizeOfImage`, the section table and every following RVA. The overlay —
-the bytes after the last section's raw data — is not mapped as part of the image,
-so changing its size needs no header edits and no relocations. `surreal diff`
-refuses any other size change, with a message naming the section that moved.
+**Overlay vs. image.** The overlay — the bytes after the last section's raw data
+— is not mapped as part of the image, so `append`/`truncate` need no header edits
+and no relocations. Growing *inside* the mapped image does change `SizeOfImage`
+and the section table, so v1 makes that an explicit, separately-audited op
+instead of a silent side effect.
 
-Extra rules enforced by the loader and the planner:
+#### `extend-section`
 
-* `append` and `truncate` cannot be mixed in one bundle (ordering would be
-  ambiguous), and neither can carry `anchor` / `section` / `rva`.
-* Size-changing bundles require an **exact** target match: `--accept-drift` is
-  refused (an append is only meaningful on the build it was authored for).
+The payload is appended to the raw data of the **last** section and three header
+fields are rewritten: the section's `VirtualSize`, its `SizeOfRawData` (payload
+padded up to `FileAlignment`) and the optional header's `SizeOfImage` (rounded up
+to `SectionAlignment`). `NumberOfSections` is untouched.
+
+```json
+{ "op": "extend-section", "section": ".data",
+  "raw_size_before": 512, "virtual_size_after": 572,
+  "replace": "0D 0A 5B 53 55 52 52 45 41 4C 2D 44 45 4D 4F 5D …",
+  "comment": "grow .data from 0x200 to 0x400 raw bytes" }
+```
+
+| Field | Rules |
+|---|---|
+| `section` | **required.** Must be the last section of the image |
+| `replace` | **required.** The logical payload; the writer pads it to `FileAlignment` |
+| `raw_size_before` | optional. Refuses the apply if the old `SizeOfRawData` differs |
+| `virtual_size_after` | optional. Resulting `VirtualSize` (default: old `VirtualSize` + payload). Must lie between the old `VirtualSize` and the new raw size |
+
+#### `add-section`
+
+Adds a 40-byte section header after the existing entries (requires ≥ 40 bytes of
+`SizeOfHeaders` slack — the planner reports "header slack nearly exhausted" when
+it gets tight) and appends the section's raw data, aligned to `FileAlignment`.
+
+```json
+{ "op": "add-section", "name": ".smod", "characteristics": "0x40000040",
+  "virtual_size_after": 160, "rva": 12288,
+  "replace": "4D 4F 44 44 41 54 41 21 …" }
+```
+
+| Field | Rules |
+|---|---|
+| `name` | **required.** 1–8 bytes; must not already exist |
+| `characteristics` | **required.** Section flags, e.g. `0x40000040` (initialised data, readable). Never set `IMAGE_SCN_MEM_EXECUTE` by accident |
+| `replace` | **required.** The section payload |
+| `virtual_size_after` | optional. Defaults to the payload length |
+| `rva` | optional. Defaults to the next `SectionAlignment` boundary after the last section; must not collide with an existing section |
+
+#### Rules for all size/layout ops
+
+* A bundle may contain **only one kind** of size-changing hunk (`append`,
+  `truncate`, `extend-section` or `add-section`), and only one such hunk in total
+  per kind — ordering would otherwise be ambiguous. Use a
+  [collection](COLLECTIONS.md) for several *size-preserving* patches.
+* Neither op may carry `expect`, `anchor` or `offset`: they are positional by
+  definition, so there is nothing to locate and nothing to compare against.
+  Integrity comes from the exact target hash instead.
+* Size/layout changes require an **exact** target match: `--accept-drift` is
+  refused.
+* Refused outright: a non-last section, an existing overlay (the image is not
+  last in the file), a last section whose raw data does not end at EOF, a
+  `virtual_size_after` smaller than the old `VirtualSize`, and any `rva` that
+  lands inside an existing section.
 * `truncate` verifies the file really ends with the bytes in `expect`.
-* The PE checksum includes the file size, so it is recomputed from the written
-  file; `check` reports "recomputed on write" instead of a predicted value.
+* The PE checksum includes the file size and the headers, so it is recomputed
+  from the written file; `check` reports "recomputed on write" instead of a
+  predicted value.
+* After writing, the patcher re-parses the temporary file and proves section
+  count, `SizeOfImage`, file size, section bounds and the checksum **before** the
+  atomic rename. A failed proof leaves the original untouched.
 * Raw (non-PE) targets are supported only for bundles made entirely of raw
   offsets and EOF ops — that is what `surreal diff --force` produces.
+
+#### How `surreal diff` produces these
+
+`surreal diff` classifies the difference first (in-place → size-preserving;
+appended bytes → `append`; anything else → a candidate layout change) and then
+**replays** the candidate hunk through the real applier on a temporary copy of
+the old build. A surgery hunk is only emitted if that replay reproduces the new
+build **byte-for-byte** (the checksum field excepted, since both sides compute
+it from their own contents). If the replay does not match, `diff` refuses and
+explains which section moved — it never guesses a header edit.
 
 ## `policy`
 

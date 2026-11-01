@@ -21,8 +21,11 @@ ALLOWED_KEYS = {
 }
 ALLOWED_TARGET_KEYS = {"filename", "size", "sha256", "pe", "authenticode", "sections"}
 ALLOWED_HUNK_KEYS = {"op", "anchor", "delta", "section", "rva", "offset",
-                     "expect", "replace", "comment", "enabled"}
-HUNK_OPS = {"patch", "append", "truncate"}
+                     "expect", "replace", "comment", "enabled",
+                     "raw_size_before", "virtual_size_after", "characteristics",
+                     "name"}
+HUNK_OPS = {"patch", "append", "truncate", "extend-section", "add-section"}
+IMAGE_OPS = {"extend-section", "add-section"}
 ALLOWED_ANCHOR_KEYS = {"name", "pattern", "file_offset", "rva", "section", "unique",
                        "comment"}
 
@@ -49,6 +52,10 @@ class Hunk:
     comment: str = ""
     enabled: bool = True
     op: str = "patch"
+    raw_size_before: Optional[int] = None
+    virtual_size_after: Optional[int] = None
+    characteristics: Optional[int] = None
+    name: Optional[str] = None
 
     @property
     def length(self) -> int:
@@ -67,7 +74,17 @@ class Hunk:
             out["rva"] = self.rva
         if self.offset is not None:
             out["offset"] = self.offset
-        out["expect"] = " ".join("%02X" % v if v is not None else "??" for v in self.expect)
+        if self.raw_size_before is not None:
+            out["raw_size_before"] = self.raw_size_before
+        if self.virtual_size_after is not None:
+            out["virtual_size_after"] = self.virtual_size_after
+        if self.characteristics is not None:
+            out["characteristics"] = "0x%08X" % self.characteristics
+        if self.name:
+            out["name"] = self.name
+        if self.expect:
+            out["expect"] = " ".join("%02X" % v if v is not None else "??"
+                                     for v in self.expect)
         out["replace"] = format_hex(self.replace)
         if self.comment:
             out["comment"] = self.comment
@@ -255,7 +272,8 @@ class Bundle:
             except ValueError as exc:
                 raise BundleError("hunk %d replace: %s" % (i, exc)) from exc
             expect_raw = h.get("expect")
-            if expect_raw is None and op == "append":
+            if expect_raw is None and op in ("append", "extend-section",
+                                             "add-section"):
                 expect_raw = ""
             if expect_raw is None:
                 raise BundleError("hunk %d has no 'expect' bytes (refusing a blind patch)" % i)
@@ -288,12 +306,35 @@ class Bundle:
                                       "in 'expect'" % i)
                 if replace:
                     raise BundleError("hunk %d: truncate cannot replace bytes" % i)
+            elif op in IMAGE_OPS:
+                if expect:
+                    raise BundleError(
+                        "hunk %d: %s carries no 'expect' (the target identity and "
+                        "the declared geometry are the preconditions)" % (i, op))
+                if not replace:
+                    raise BundleError("hunk %d: %s needs bytes to append" % (i, op))
+                if h.get("anchor") is not None or h.get("offset") is not None:
+                    raise BundleError("hunk %d: %s cannot be anchored or offset-based"
+                                      % (i, op))
+                if op == "extend-section" and not h.get("section"):
+                    raise BundleError("hunk %d: extend-section needs a 'section' name"
+                                      % i)
+                if op == "add-section":
+                    if not h.get("name"):
+                        raise BundleError("hunk %d: add-section needs a 'name'" % i)
+                    if h.get("characteristics") is None:
+                        raise BundleError("hunk %d: add-section needs "
+                                          "'characteristics'" % i)
             anchor_idx = _opt_int(h.get("anchor"))
             if anchor_idx is not None and not (0 <= anchor_idx < len(anchors)):
                 raise BundleError("hunk %d references anchor %d which does not exist"
                                   % (i, anchor_idx))
             hunks.append(Hunk(
                 op=op, expect=expect, replace=replace, anchor=anchor_idx,
+                raw_size_before=_opt_int(h.get("raw_size_before")),
+                virtual_size_after=_opt_int(h.get("virtual_size_after")),
+                characteristics=_parse_characteristics(h.get("characteristics")),
+                name=h.get("name"),
                 delta=_opt_int(h.get("delta")) or 0,
                 section=h.get("section"), rva=_opt_int(h.get("rva")),
                 offset=_opt_int(h.get("offset")),
@@ -354,6 +395,17 @@ class Bundle:
         return "%s (%s) — %d hunk(s), target %s" % (
             self.name, self.id, len([h for h in self.hunks if h.enabled]),
             self.target.get("filename") or self.target.get("sha256", "?")[:12])
+
+
+def _parse_characteristics(v) -> Optional[int]:
+    if v is None:
+        return None
+    if isinstance(v, str):
+        try:
+            return int(v, 0)
+        except ValueError as exc:
+            raise BundleError("characteristics must be a number, got %r" % (v,)) from exc
+    return _opt_int(v)
 
 
 def _opt_int(v) -> Optional[int]:

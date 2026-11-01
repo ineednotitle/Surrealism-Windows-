@@ -10,14 +10,15 @@
 | `surreal/patchfile.py` | `.morph` schema: load, validate, save, policy flags | execute anything |
 | `surreal/diffgen.py` | before/after → hunks, anchor selection with uniqueness proof | write to the target |
 | `surreal/patcher.py` | plan → verify → backup → patch copy → checksum → atomic swap | skip verification |
+| `surreal/surgery.py` | plan + post-write proof for the two header-surgery ops (`extend-section`, `add-section`) | execute anything, touch overlays |
 | `surreal/journal.py` | `<dir>/.surreal/journal.json` + `backups/` | lose a backup silently |
 | `surreal/policy.py` | acceptable-use acknowledgement gate | nag twice |
 | `surreal/testkit.py` | synthetic PE builder, `selftest`, demo fixtures | ship real binaries |
 | `surreal/util.py` | hex parsing, hashing, atomic JSON IO, hexdump | hold global state |
 
 Dependency direction is strictly one-way: `cli → {diffgen, patcher, patchfile,
-pe, scanner, policy}` and `patcher → {patchfile, pe, scanner, journal}`. No
-module imports `cli`.
+pe, scanner, policy}` and `patcher → {patchfile, pe, scanner, journal, surgery}`.
+No module imports `cli`.
 
 ## Invariants
 
@@ -37,6 +38,16 @@ module imports `cli`.
    executable.
 6. **Fail closed.** Ambiguity → abort. Disagreement → abort. Unknown bundle
    fields → abort (unless `--lax`).
+
+7. **Layout changes are explicit.** `append`/`truncate` only ever touch the
+   overlay. Growing the mapped image (`extend-section`, `add-section`) is a
+   separate op with its own planner (`surgery.py`), its own refusals (non-last
+   section, existing overlay, last-section raw end ≠ EOF, RVA collision, header
+   slack < 40 bytes) and a post-write proof: the temp file is re-parsed and
+   `NumberOfSections`, `SizeOfImage`, file size, section bounds and the checksum
+   must all match the prediction **before** `os.replace`. `surreal diff` emits
+   such a hunk only when a replay through the applier reproduces the new build
+   byte-for-byte, so the generator cannot invent a header edit.
 
 ## Data flow
 

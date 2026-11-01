@@ -213,7 +213,7 @@ gets full per-hunk byte verification. Any failure restores the single backup and
 journals a rollback. Manifest format and semantics:
 [`docs/COLLECTIONS.md`](docs/COLLECTIONS.md).
 
-### Size-changing patches (v0.3, overlay only)
+### Overlay size changes (v0.3)
 
 `surreal diff` now also handles two builds whose **overlay** differs in size —
 the bytes after the last section, which are not mapped into the image:
@@ -226,11 +226,45 @@ surreal apply add-config.morph --target old.exe     # file grows, checksum recom
 surreal apply remove-config.morph --target old.exe  # op=truncate, file shrinks back
 ```
 
-Deliberately refused, with a message naming the section that moved: resizing a
-section, adding/removing sections, or any size change inside mapped image data.
-Those need header rewrites and RVA fixups; pretending otherwise is how patchers
-ship corrupt executables. Size-changing bundles also refuse `--accept-drift`,
-because an append is only meaningful on the exact build it was authored for.
+Size-changing bundles also refuse `--accept-drift`, because an append is only
+meaningful on the exact build it was authored for.
+
+### Header surgery (v0.5): growing the image on purpose
+
+The overlay is not mapped, so growing it needs no header edits. Growing *inside*
+the image does — and v0.5 does that as a separate, auditable operation rather
+than a side effect:
+
+| `op` | What it does | Header fields rewritten |
+|---|---|---|
+| `extend-section` | appends payload to the **last** section | its `VirtualSize`, `SizeOfRawData`, and `SizeOfImage` |
+| `add-section` | appends a whole new section (needs ≥ 40 bytes of header slack) | `NumberOfSections`, new 40-byte header, `SizeOfImage` |
+
+```bash
+# old.exe → new.exe where new.exe has 60 extra bytes in .data
+surreal diff old.exe new.exe -o grow.morph --id me.grow-data
+#   hunks: 1   op=extend-section   section=.data   +512 bytes (padded to FileAlignment)
+surreal check grow.morph --target old.exe
+surreal apply grow.morph --target old.exe -y     # rewrites 3 header fields + checksum
+surreal revert old.exe                           # restores the backup, size included
+```
+
+Still refused, with a message naming what moved: resizing a **non-last** section,
+growing a file that already has an overlay, a last section whose raw data does not
+end at EOF, an `rva` that collides with an existing section, and adding a section
+when the headers are already full. There are no RVA fixups: growing the last
+section moves nothing, which is exactly why it is the only resize allowed.
+
+The safety story is a proof, not a promise:
+
+* `surreal diff` emits a surgery hunk **only if** replaying it through the real
+  applier on a temp copy reproduces the new build byte-for-byte (checksum field
+  excepted). Otherwise it refuses and explains which section moved.
+* After writing, the patcher re-parses the temp file and proves section count,
+  `SizeOfImage`, file size, section bounds and the checksum **before** the atomic
+  rename. A failed proof leaves the original untouched.
+* A bundle may contain exactly one size-changing hunk, and never together with
+  `--accept-drift`: these ops are positional, so identity is the whole safety net.
 
 ## Low-end by design (4 GB RAM, 2 cores, HDD)
 
@@ -301,7 +335,8 @@ contributor is allowed to modify.
 | **M0 (shipped)** | PE parser, scanner, diff→bundle, apply/revert/journal, policy gate, CI, exe build |
 | **M1 (shipped, v0.2)** | ed25519-signed bundles + trusted-key store, crash-safe apply lock, ASLR/relocation safety checks, `--max-mem` guard |
 | **M2-lite (shipped, v0.3)** | `op: append` / `op: truncate` for overlay size changes; everything inside the image still refused |
-| M2+ | `op: extend-section` / `op: add-section` with explicit opt-in, header rewriting, RVA fixups |
+| **M2+ (shipped, v0.5)** | `op: extend-section` / `op: add-section`: header rewriting, SizeOfImage growth, replay-proven generation, post-write proof |
+| **M3-lite (shipped, v0.4)** | `surreal collection`: N size-preserving bundles applied as one transaction with a single backup |
 | M3 | multi-file "vault" bundles (apply N files atomically), patch dependencies |
 | M4 | `--tui` and `apply --repo` for curated bundle collections |
 

@@ -131,9 +131,12 @@ Exit codes: `0` ok · `2` usage · `3` target mismatch / unfindable anchor ·
    `apply` can refuse a hunk that no longer looks like what the author tested.
 4. **Identity capture**: target filename, size, SHA-256, machine, timestamp,
    entrypoint RVA, image base, per-section fingerprints, Authenticode state.
-5. **Same-size enforcement**: v1 refuses size-changing diffs (exit 3 with a
-   clear message). Adding sections / resizing the image is v2 work — pretending
-   to support it in v1 is how you ship corrupted executables.
+5. **Same-size enforcement (relaxed only where it is provable)**: v1 refused
+   every size-changing diff. v0.3 added overlay growth and v0.5 added last-section
+   growth plus section appending — each behind its own op, planner, refusals and
+   replay proof (see *M2+* below). Resizing a section that is not last is still
+   refused outright: pretending to support it is how you ship corrupted
+   executables.
 
 ### 3.2 Bundle format (`.morph`, JSON, canonical/stable ordering)
 
@@ -345,9 +348,46 @@ the pristine hash, later members are hash-drifted by design but keep full
 per-hunk byte verification. Manifest paths are confined to the collection
 directory (no absolute paths, no `..`).
 
-Deferred to M2+: `extend-section` / `add-section` with header rewriting and
-relocation fixups; then multi-file vaults (several binaries per collection),
-TUI, repo client.
+### M2+ (shipped in v0.5) — header surgery inside the image
+
+Two new ops let a bundle change the layout of the mapped image without becoming a
+script:
+
+| `op` | Payload → | Header fields rewritten |
+|---|---|---|
+| `extend-section` | appended to the **last** section's raw data (padded to `FileAlignment`) | that section's `VirtualSize` + `SizeOfRawData`, `SizeOfImage` |
+| `add-section` | a new section's raw data (padded, aligned) | `NumberOfSections`, the new 40-byte header, `SizeOfImage` |
+
+Why these two and nothing else: growing the last section moves no other section,
+so **no RVA fixups are needed** — the only thing that changes is `SizeOfImage`
+(round up to `SectionAlignment`), which the loader uses to reserve address space.
+Any resize that *would* move later sections is refused by construction.
+
+Safety, in three layers:
+
+1. **Planner refusals** (`surreal/surgery.py`): non-last section, existing
+   overlay, last-section raw end ≠ EOF, `virtual_size_after` outside
+   `[old VirtualSize, new raw size]`, `add-section` with < 40 bytes of header
+   slack, duplicate/invalid section name, `rva` colliding with a live section.
+2. **Generation by proof** (`surreal/diffgen.py`): a surgery hunk is emitted only
+   if replaying it through the real applier on a temp copy reproduces the new
+   build byte-for-byte (`Checksum` field excepted). The generator therefore
+   cannot ship a header edit it has not executed.
+3. **Post-write proof** (`patcher._verify_surgery`): the temp file is re-parsed
+   and `NumberOfSections`, `SizeOfImage`, file size, section bounds and checksum
+   must match the plan **before** `os.replace`. Failure leaves the original
+   intact.
+
+Bundle rules: exactly one size/layout hunk per bundle (each is planned against
+the original image, so combining them is meaningless), never with
+`--accept-drift`, and no `expect`/`anchor`/`offset` (positional ops have nothing
+to locate). Everything is still declarative JSON — no code, no scripting.
+
+Not done, and deliberately so: moving an existing section, inserting a section
+in the middle, rewriting relocations, or changing the entry point. Those need a
+real linker and are the point where a byte-patcher should stop pretending.
+
+Next: multi-file vaults (several binaries per collection), TUI, repo client.
 
 ## 7. Milestones
 
@@ -355,7 +395,7 @@ TUI, repo client.
 |---|---|---|
 | **M0 (this PR)** | plan, PE parser, scanner, diff→bundle, apply/revert/journal, policy gate, docs, CI, exe build | `python -m unittest` green on Windows & Linux; a bundle round-trips on a synthetic PE |
 | M1 | ed25519 `.morph` signatures (pure-Python, no dependency), trusted-key store, apply lock, ASLR/relocation checks, `--max-mem` | bundles are tamper-evident and safe on relocatable images — **done (v0.2)** |
-| M2 | size-changing patches (append section, extend overlay), manifest/vault for multi-file apps | patch a 3-file app atomically |
+| M2 | size-changing patches (append overlay — **done v0.3**; extend/add section — **done v0.5**), manifest/vault for multi-file apps | patch a 3-file app atomically |
 | M3 | optional patch scripting (sandboxed, no shell), patch dependencies/conflicts | community patch repo works |
 | M4 | TUI (`--tui`) + patch repository client (`apply --repo repo.json`) | one-command "apply all trusted bundles" |
 

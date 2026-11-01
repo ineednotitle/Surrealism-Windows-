@@ -161,6 +161,13 @@ def build_bundle(old_path: str, new_path: str, bundle_id: str, name: str,
                  created_utc: Optional[str] = None,
                  budget=None) -> Tuple[Bundle, dict]:
     """Create an in-memory :class:`Bundle`. Returns ``(bundle, stats)``."""
+    image_hunk = None
+    if os.path.getsize(old_path) != os.path.getsize(new_path):
+        image_hunk = _classify_image_change(old_path, new_path, budget=budget)
+        if image_hunk is not None:
+            return _bundle_with_hunk(old_path, image_hunk, bundle_id, name, author,
+                                     description, notes, version, created_utc)
+
     ranges, tail = compare_files_ex(old_path, new_path, merge_gap=merge_gap)
     if not ranges and tail is None:
         raise DiffError("the two files are byte-identical — nothing to record")
@@ -328,6 +335,198 @@ def _warn_about_relocations(pe: PE, ranges: List[Range], stats: dict) -> None:
             "%d hunk(s) overwrite relocated (absolute-address) fields: %s — apply "
             "will refuse these unless you have verified rebasing"
             % (len(hits), where))
+
+
+def _classify_image_change(old_path: str, new_path: str, budget=None) -> Optional[Hunk]:
+    """Recognise ``extend-section`` / ``add-section`` and prove it by replaying it.
+
+    The generator never trusts its own structural guess: it builds the candidate
+    hunk, applies it to a temporary copy of the *old* file with the real applier,
+    and only reports success when the result is byte-identical to the new file.
+    """
+    try:
+        old_pe = PE.open(old_path)
+    except (PEError, OSError):
+        return None
+    try:
+        try:
+            new_pe = PE.open(new_path)
+        except (PEError, OSError):
+            return None
+        try:
+            candidate = _guess_image_hunk(old_pe, new_pe, new_path)
+        finally:
+            new_pe.close()
+    finally:
+        old_pe.close()
+    if candidate is None:
+        return None
+    if not _replay_matches(old_path, new_path, candidate):
+        return None
+    return candidate
+
+
+def _sections_equal(a, b) -> bool:
+    return (a.name == b.name and a.virtual_address == b.virtual_address
+            and a.raw_ptr == b.raw_ptr and a.raw_size == b.raw_size
+            and a.virtual_size == b.virtual_size
+            and a.characteristics == b.characteristics)
+
+
+def _guess_image_hunk(old_pe: PE, new_pe: PE, new_path: str) -> Optional[Hunk]:
+    with open(new_path, "rb") as fh:
+        new_size = os.path.getsize(new_path)
+        if new_size <= old_pe.size:
+            return None
+        if new_pe.overlay_size or old_pe.overlay_size:
+            return None  # overlays complicate the layout; use append/truncate
+
+        # --- extend-section: identical sections, last one grew in place ----- #
+        if len(new_pe.sections) == len(old_pe.sections):
+            pairs = list(zip(old_pe.sections, new_pe.sections))
+            if not all(_sections_equal(a, b) for a, b in pairs[:-1]):
+                return None
+            old_last, new_last = pairs[-1]
+            if (old_last.name != new_last.name
+                    or old_last.raw_ptr != new_last.raw_ptr
+                    or old_last.characteristics != new_last.characteristics
+                    or new_last.raw_size <= old_last.raw_size
+                    or new_last.virtual_size < old_last.virtual_size):
+                return None
+            if old_last.raw_end != old_pe.size or new_last.raw_end != new_size:
+                return None
+            if old_last.raw_size != (old_pe.size - old_last.raw_ptr):
+                return None
+            payload_len = new_size - old_pe.size
+            fh.seek(old_pe.size)
+            payload = fh.read(payload_len)
+            if not payload:
+                return None
+            return Hunk(op="extend-section", section=old_last.name, expect=[],
+                        replace=payload, raw_size_before=old_last.raw_size,
+                        virtual_size_after=new_last.virtual_size,
+                        comment="grow %s from 0x%X to 0x%X raw bytes"
+                                % (old_last.name, old_last.raw_size,
+                                   new_last.raw_size))
+
+        # --- add-section: one extra section, everything else identical ------ #
+        if len(new_pe.sections) == len(old_pe.sections) + 1:
+            if not all(_sections_equal(a, b) for a, b in
+                       zip(old_pe.sections, new_pe.sections)):
+                return None
+            extra = new_pe.sections[-1]
+            expected_ptr = align_up(old_pe.size, old_pe.file_alignment or 0x200)
+            if extra.raw_ptr != expected_ptr or extra.raw_end != new_size:
+                return None
+            if old_pe.last_section_end != old_pe.size:
+                return None
+            fh.seek(extra.raw_ptr)
+            payload = fh.read(new_size - extra.raw_ptr)
+            if not payload:
+                return None
+            return Hunk(op="add-section", name=extra.name, section=extra.name,
+                        expect=[], replace=payload,
+                        characteristics=extra.characteristics,
+                        rva=extra.virtual_address,
+                        virtual_size_after=extra.virtual_size,
+                        comment="add section %s at RVA 0x%X (0x%X raw bytes)"
+                                % (extra.name, extra.virtual_address, extra.raw_size))
+    return None
+
+
+def align_up(value: int, alignment: int) -> int:
+    if alignment <= 0:
+        return value
+    rem = value % alignment
+    return value if rem == 0 else value + (alignment - rem)
+
+
+def _replay_matches(old_path: str, new_path: str, hunk: Hunk) -> bool:
+    """Apply the candidate hunk to a copy of ``old`` and compare with ``new``."""
+    import shutil
+    import tempfile
+
+    from .patcher import PatchError, apply_bundle
+    from .patchfile import Bundle
+
+    workdir = tempfile.mkdtemp(prefix="surreal-replay-")
+    copy_path = os.path.join(workdir, os.path.basename(old_path))
+    try:
+        shutil.copyfile(old_path, copy_path)
+        sha = sha256_file(copy_path)
+        bundle = Bundle(
+            id="org.surreal.replay", name="replay",
+            target={"filename": os.path.basename(old_path),
+                    "size": os.path.getsize(copy_path), "sha256": sha},
+            hunks=[hunk],
+        )
+        try:
+            apply_bundle(bundle, copy_path, no_backup=True, keep_backups=0,
+                         no_checksum=False)
+        except PatchError:
+            return False
+        return _files_equal_ignoring_checksum(copy_path, new_path)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _files_equal_ignoring_checksum(a_path: str, b_path: str) -> bool:
+    if os.path.getsize(a_path) != os.path.getsize(b_path):
+        return False
+    try:
+        with PE.open(a_path) as pe:
+            skip = pe._checksum_offset
+    except (PEError, OSError):
+        skip = None
+    with open(a_path, "rb") as fa, open(b_path, "rb") as fb:
+        if skip is None:
+            while True:
+                a = fa.read(CHUNK)
+                b = fb.read(CHUNK)
+                if not a and not b:
+                    return True
+                if a != b:
+                    return False
+        fa.seek(0)
+        fb.seek(0)
+        if fa.read(skip) != fb.read(skip):
+            return False
+        fa.seek(skip + 4)
+        fb.seek(skip + 4)
+        while True:
+            a = fa.read(CHUNK)
+            b = fb.read(CHUNK)
+            if not a and not b:
+                return True
+            if a != b:
+                return False
+
+
+def _bundle_with_hunk(old_path: str, hunk: Hunk, bundle_id: str, name: str,
+                      author: str, description: str, notes: str, version: str,
+                      created_utc: Optional[str]) -> Tuple[Bundle, dict]:
+    """Build a bundle that contains exactly one layout-changing hunk."""
+    stats = {"ranges": 0, "anchored": 0, "section_rva": 0, "offset_only": 0,
+             "warnings": [], "size_delta": 0}
+    pe = PE.open(old_path)
+    try:
+        sha = sha256_file(old_path)
+        target = pe.identity(sha)
+        target["filename"] = os.path.basename(old_path)
+        stats["warnings"].append(
+            "layout change: %s (%d payload bytes) — verified by replaying it "
+            "against the target" % (hunk.op, len(hunk.replace)))
+    finally:
+        pe.close()
+    bundle = Bundle(
+        id=bundle_id, name=name, target=target, hunks=[hunk], anchors=[],
+        description=description, notes=notes, version=version, author=author,
+        created_utc=created_utc or datetime.datetime.now(datetime.timezone.utc)
+        .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        tool={"name": TOOL_NAME, "version": __version__},
+        policy=Policy(forbidden_categories=[]),
+    )
+    return bundle, stats
 
 
 def _validate_overlay_change(pe: PE, old_path: str, new_path: str,

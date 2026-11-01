@@ -42,6 +42,7 @@ class Resolved:
     replace: bytes
     located_by: str
     op: str = "patch"
+    surgery: Optional[Any] = None
 
     @property
     def grows_file(self) -> bool:
@@ -72,6 +73,8 @@ class Plan:
             "hunks": [
                 {"index": r.index, "op": r.op, "offset": r.offset,
                  "length": r.length,
+                 **({"surgery": r.surgery.to_dict()}
+                    if r.surgery is not None and hasattr(r.surgery, "to_dict") else {}),
                  "expect": format_hex(r.expect), "replace": format_hex(r.replace),
                  "located_by": r.located_by}
                 for r in self.resolved
@@ -272,18 +275,28 @@ def check_signature(bundle: Bundle, require: bool = False, config_dir: Optional[
 
 
 def _precheck_size_ops(bundle: Bundle, accept_drift: bool) -> None:
-    ops = {h.op for h in bundle.hunks if h.enabled}
-    if "append" in ops and "truncate" in ops:
-        raise PatchError("a bundle cannot both append and truncate", code=3)
-    if ops & {"append", "truncate"}:
+    size_ops = [h.op for h in bundle.hunks if h.enabled and h.op != "patch"]
+    ops = set(size_ops)
+    if len(ops) > 1:
+        raise PatchError(
+            "a bundle may contain only one kind of size-changing hunk (found %s); "
+            "mixing them makes the resulting layout ambiguous"
+            % ", ".join(sorted(ops)), code=3)
+    if len(size_ops) > 1:
+        raise PatchError(
+            "a bundle may contain only one size-changing hunk (%d found: %s); "
+            "each one is planned against the original image, so they cannot be "
+            "combined — use a collection for size-preserving patches"
+            % (len(size_ops), ", ".join(size_ops)), code=3)
+    if ops & {"append", "truncate", "extend-section", "add-section"}:
         if accept_drift:
             raise PatchError(
-                "this bundle changes the file size (append/truncate), which is only "
+                "this bundle changes the size or layout of the file, which is only "
                 "safe against the exact build it was authored for — re-run without "
                 "--accept-drift", code=3)
-        if any(h.section or h.anchor is not None for h in bundle.hunks
-               if h.op != "patch"):
-            raise PatchError("size-changing hunks cannot carry image locators", code=3)
+        if any(h.anchor is not None or h.offset is not None for h in bundle.hunks
+               if h.op in ("append", "truncate")):
+            raise PatchError("overlay hunks cannot carry image locators", code=3)
 
 
 def build_plan(bundle: Bundle, target_path: str, accept_drift: bool = False,
@@ -328,6 +341,9 @@ def build_plan(bundle: Bundle, target_path: str, accept_drift: bool = False,
         for idx, hunk in enumerate(bundle.hunks):
             if not hunk.enabled:
                 plan.notes.append("hunk %d disabled, skipped" % idx)
+                continue
+            if hunk.op in ("extend-section", "add-section"):
+                plan.resolved.append(resolve_surgery_hunk(hunk, idx, pe, plan))
                 continue
             plan.resolved.append(resolve_hunk(bundle, hunk, idx, pe, anchor_offsets))
 
@@ -454,6 +470,25 @@ def _build_raw_plan(bundle: Bundle, target_path: str, sha: str,
     plan.checksum_applicable = False
     plan.notes.append("non-PE target: PE checksum is not applicable")
     return plan
+
+
+def resolve_surgery_hunk(hunk: Hunk, index: int, pe: PE, plan: Plan) -> Resolved:
+    """Validate an extend-section / add-section hunk and record its plan."""
+    from . import surgery
+
+    try:
+        plan_obj = surgery.plan_for_hunk(pe, hunk, index)
+    except surgery.SurgeryError as exc:
+        raise PatchError("hunk %d (%s): %s" % (index, hunk.op, exc), code=3) from exc
+    plan.notes.extend("hunk %d: %s" % (index, note) for note in plan_obj.notes)
+    plan.notes.append(
+        "hunk %d: %s → file %d bytes, SizeOfImage 0x%X (headers rewritten: %d field(s))"
+        % (index, plan_obj.kind, plan_obj.file_size_after,
+           plan_obj.image_size_after, len(plan_obj.writes)))
+    return Resolved(index=index, offset=pe.size, length=len(hunk.replace),
+                    expect=b"", replace=hunk.replace,
+                    located_by="%s (header surgery)" % plan_obj.kind,
+                    op=hunk.op, surgery=plan_obj)
 
 
 def _check_size_ops(plan: Plan, accept_drift: bool) -> None:
@@ -598,9 +633,13 @@ def apply_bundle(bundle: Bundle, target_path: str, dry_run: bool = False,
 
         # 2. patch the copy
         size_changed = any(r.op != "patch" for r in plan.resolved)
+        surgery_ops = [r for r in plan.resolved if r.op in ("extend-section",
+                                                            "add-section")]
         with open(tmp_path, "r+b") as fh:
             for r in sorted(plan.resolved, key=lambda x: x.offset):
-                if r.op == "append":
+                if r.op in ("extend-section", "add-section"):
+                    _write_surgery(fh, r)
+                elif r.op == "append":
                     fh.seek(0, os.SEEK_END)
                     fh.write(r.replace)
                 elif r.op == "truncate":
@@ -630,6 +669,7 @@ def apply_bundle(bundle: Bundle, target_path: str, dry_run: bool = False,
                 raise PatchError("patched copy is no longer a valid PE (%s) — original "
                                  "untouched" % exc, code=5) from exc
         else:
+            _verify_surgery(target, plan.resolved, tmp_path)
             # raw bundle: at least prove every written hunk reads back
             with open(tmp_path, "rb") as fh:
                 for r in plan.resolved:
@@ -681,6 +721,37 @@ def _checksum_of_file(path: str) -> int:
     """Checksum of an arbitrary on-disk image (needed when the size changed)."""
     with PE.open(path) as pe:
         return pe.compute_checksum()
+
+
+def _write_surgery(fh, resolved: Resolved) -> None:
+    """Apply one header-surgery op to the working copy."""
+    surg = resolved.surgery
+    if surg is None:
+        raise PatchError("hunk %d has no surgery plan" % resolved.index, code=5)
+    for offset, data in surg.writes:
+        fh.seek(offset)
+        existing = fh.read(len(data))
+        fh.seek(offset)
+        fh.write(data)
+        if existing == data:
+            continue
+    fh.seek(0, os.SEEK_END)
+    fh.write(surg.payload)
+
+
+def _verify_surgery(target_path: str, resolved: List[Resolved], tmp_path: str) -> None:
+    """Prove the rewritten layout is exactly what the plan promised."""
+    from . import surgery
+
+    ops = [r for r in resolved if r.surgery is not None]
+    if not ops:
+        return
+    try:
+        with PE.open(target_path) as before:
+            for r in ops:
+                surgery.verify_after(before, r.surgery, tmp_path)
+    except surgery.SurgeryError as exc:
+        raise PatchError("%s — original untouched" % exc, code=5) from exc
 
 
 def _write_checksum(fh, checksum: int) -> None:

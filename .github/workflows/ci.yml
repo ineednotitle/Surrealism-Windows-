@@ -60,6 +60,12 @@ jobs:
         run: |
           python -m surreal apply examples/demo-append-overlay.morph --target demo-out/demo_app.exe -y
           python -m surreal revert demo-out/demo_app.exe
+      - name: Header surgery (M2+) smoke
+        run: |
+          python -m surreal check examples/demo-extend-section.morph --target demo-out/demo_app.exe
+          python -m surreal apply examples/demo-extend-section.morph --target demo-out/demo_app.exe -y
+          python -m surreal inspect demo-out/demo_app.exe --json > after.json
+          python -m surreal revert demo-out/demo_app.exe
       - name: Performance budget
         run: python tools/bench.py --mb 32
 

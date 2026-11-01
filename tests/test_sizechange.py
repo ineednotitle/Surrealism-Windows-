@@ -174,7 +174,7 @@ class TestRefusals(SizeChangeCase):
         bundle = Bundle.from_dict(raw)
         with self.assertRaises(patcher.PatchError) as ctx:
             patcher.build_plan(bundle, self.old)
-        self.assertIn("both append and truncate", str(ctx.exception))
+        self.assertIn("only one kind", str(ctx.exception))
 
     def test_append_with_expect_rejected(self):
         with self.assertRaises(BundleError) as ctx:
