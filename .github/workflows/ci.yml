@@ -128,33 +128,36 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          ./dist/surreal.exe --version
-          ./dist/surreal.exe selftest
-          ./dist/surreal.exe demo --out frozen-demo
-          ./dist/surreal.exe check frozen-demo/demo-shorten-nag.morph --target frozen-demo/demo_app.exe
-          ./dist/surreal.exe keys --generate frozen-demo/frozen.key --label frozen
-          ./dist/surreal.exe sign frozen-demo/demo-shorten-nag.morph --key frozen-demo/frozen.key
-          ./dist/surreal.exe verify frozen-demo/demo-shorten-nag.morph
-          ./dist/surreal.exe init --accept-policy
-          ./dist/surreal.exe apply frozen-demo/demo-shorten-nag.morph --target frozen-demo/demo_app.exe -y
-          ./dist/surreal.exe revert frozen-demo/demo_app.exe
+          : > frozen.log
+          step() {
+            echo "==== $*" | tee -a frozen.log
+            if ! "$@" >> frozen.log 2>&1; then
+              tail_text=$(tail -n 25 frozen.log | tr '\n' '|' | sed 's/%/%25/g')
+              echo "::error title=frozen exe failed at: $*::${tail_text:0:2500}"
+              exit 1
+            fi
+          }
+          step ./dist/surreal.exe --version
+          step ./dist/surreal.exe selftest
+          step ./dist/surreal.exe demo --out frozen-demo
+          step ./dist/surreal.exe check frozen-demo/demo-shorten-nag.morph --target frozen-demo/demo_app.exe
+          step ./dist/surreal.exe keys --generate frozen-demo/frozen.key --label frozen
+          step ./dist/surreal.exe sign frozen-demo/demo-shorten-nag.morph --key frozen-demo/frozen.key
+          step ./dist/surreal.exe verify frozen-demo/demo-shorten-nag.morph
+          step ./dist/surreal.exe init --accept-policy
+          step ./dist/surreal.exe apply frozen-demo/demo-shorten-nag.morph --target frozen-demo/demo_app.exe -y
+          step ./dist/surreal.exe revert frozen-demo/demo_app.exe
           cp -r examples frozen-demo/examples
-          ./dist/surreal.exe collection list frozen-demo/examples
-          ./dist/surreal.exe repo index frozen-demo/examples -o frozen-demo/repo.json
-          ./dist/surreal.exe repo list frozen-demo/repo.json --target frozen-demo/demo_app.exe
-          printf 'q\n' | ./dist/surreal.exe tui --target frozen-demo/demo_app.exe --dir frozen-demo/examples
-      - name: Report frozen-binary failure
-        if: failure()
-        shell: bash
-        run: echo "::error title=frozen exe::a command in the smoke test above failed - see the step log"
-      - name: Measure size
-        shell: bash
-        run: |
-          python - <<'EOF' | tee size.txt
-          import os
-          size = os.path.getsize(os.path.join("dist", "surreal.exe"))
-          print("size: %.1f MB (%d bytes)" % (size / 1048576.0, size))
-          EOF
+          step ./dist/surreal.exe collection list frozen-demo/examples
+          step ./dist/surreal.exe repo index frozen-demo/examples -o frozen-demo/repo.json
+          step ./dist/surreal.exe repo list frozen-demo/repo.json --target frozen-demo/demo_app.exe
+          echo "==== tui (piped)" | tee -a frozen.log
+          if ! printf 'q\n' | ./dist/surreal.exe tui --target frozen-demo/demo_app.exe --dir frozen-demo/examples >> frozen.log 2>&1; then
+            tail_text=$(tail -n 25 frozen.log | tr '\n' '|' | sed 's/%/%25/g')
+            echo "::error title=frozen exe failed at: tui::${tail_text:0:2500}"
+            exit 1
+          fi
+          echo "all frozen smoke steps passed"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
