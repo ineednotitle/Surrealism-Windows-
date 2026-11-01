@@ -213,6 +213,27 @@ gets full per-hunk byte verification. Any failure restores the single backup and
 journals a rollback. Manifest format and semantics:
 [`docs/COLLECTIONS.md`](docs/COLLECTIONS.md).
 
+### Vaults (v0.5): several binaries, one transaction
+
+Apps are not one file. If every patch entry names a `target`, the collection
+becomes a **vault** over an application directory:
+
+```json
+{ "bundle": "main-theme.morph", "target": "app.exe",          "order": 10 }
+{ "bundle": "plugin-fix.morph", "target": "plugins/scan.dll", "order": 20 }
+```
+
+```bash
+surreal collection check vault/ --target "C:/Apps/BetterApp"
+surreal collection apply vault/ --target "C:/Apps/BetterApp" -y
+surreal revert "C:/Apps/BetterApp/plugins/scan.dll"      # undo one file
+```
+
+Each file gets its own backup and its own journal entry; if any file fails, every
+file touched so far is restored. Target paths must stay inside the root (no
+absolute paths, no `..`, no symlink escapes), and members must still be
+size-preserving.
+
 ### Overlay size changes (v0.3)
 
 `surreal diff` now also handles two builds whose **overlay** differs in size —
@@ -337,7 +358,8 @@ contributor is allowed to modify.
 | **M2-lite (shipped, v0.3)** | `op: append` / `op: truncate` for overlay size changes; everything inside the image still refused |
 | **M2+ (shipped, v0.5)** | `op: extend-section` / `op: add-section`: header rewriting, SizeOfImage growth, replay-proven generation, post-write proof |
 | **M3-lite (shipped, v0.4)** | `surreal collection`: N size-preserving bundles applied as one transaction with a single backup |
-| M3 | multi-file "vault" bundles (apply N files atomically), patch dependencies |
+| **M3 vault (shipped, v0.5)** | `target` per patch entry → N binaries patched as one transaction, per-file backups and journals |
+| M3 | patch dependencies/conflicts, patch scripting (sandboxed, no shell) |
 | M4 | `--tui` and `apply --repo` for curated bundle collections |
 
 MIT licensed. Not affiliated with Morphe, ReVanced or any vendor whose software

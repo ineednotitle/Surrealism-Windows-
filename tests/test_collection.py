@@ -207,7 +207,7 @@ class TestTransactionalApply(CollectionCase):
         c = self.load([{"bundle": "grow.morph"}])
         with self.assertRaises(coll.CollectionError) as ctx:
             coll.preflight(c, self.target)
-        self.assertIn("changes the file size", str(ctx.exception))
+        self.assertIn("size or layout", str(ctx.exception))
 
     def test_policy_blocked_member_refuses_whole_set(self):
         self.add_bundle("jump", self.jump)

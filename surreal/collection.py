@@ -26,6 +26,16 @@ Semantics
 * The first patch must match the target exactly. Later patches were authored
   against the pristine build, so their hash check is expected to drift; the
   per-hunk ``expect`` verification (the real safety net) still runs in full.
+
+Vaults (multi-file)
+-------------------
+If every patch entry carries a relative ``"target"`` path, the collection is a
+**vault**: it patches several binaries under one application directory (the
+``--target`` you pass is that directory). Each file gets its own backup and its
+own journal entry, so ``surreal revert <file>`` still works per file, but the
+whole set is all-or-nothing: a failure on file *n* restores every file touched
+so far. Vault members must also be size-preserving, and paths may not escape the
+root (no absolute paths, no ``..``).
 """
 
 from __future__ import annotations
@@ -48,11 +58,26 @@ FORMAT_VERSION = 1
 
 ALLOWED_KEYS = {"format", "format_version", "name", "description", "author",
                 "homepage", "license", "patches", "created_utc"}
-ALLOWED_PATCH_KEYS = {"bundle", "order", "required", "description", "enabled"}
+ALLOWED_PATCH_KEYS = {"bundle", "order", "required", "description", "enabled",
+                      "target"}
 
 
 class CollectionError(Exception):
     pass
+
+
+def safe_relative(path: str, what: str = "path") -> str:
+    """Reject absolute paths, drive letters and ``..`` segments."""
+    normalised = str(path).replace("\\", "/").strip()
+    if not normalised:
+        raise CollectionError("%s must not be empty" % what)
+    if normalised.startswith("/") or (len(normalised) > 1 and normalised[1] == ":"):
+        raise CollectionError("%s %r must be relative (absolute paths are refused)"
+                              % (what, path))
+    parts = [p for p in normalised.split("/") if p not in ("", ".")]
+    if ".." in parts:
+        raise CollectionError("%s %r must not contain '..'" % (what, path))
+    return "/".join(parts)
 
 
 @dataclass
@@ -64,6 +89,7 @@ class Entry:
     enabled: bool = True
     bundle: Optional[Bundle] = None
     path: Optional[str] = None
+    target: Optional[str] = None      # vault: path relative to the app root
 
 
 @dataclass
@@ -76,6 +102,30 @@ class Collection:
     license: str = ""
     base_dir: str = ""
     path: Optional[str] = None
+
+    @property
+    def is_vault(self) -> bool:
+        return any(e.target for e in self.entries)
+
+    def files(self) -> List[str]:
+        """Distinct target paths in manifest order (vault mode)."""
+        seen: List[str] = []
+        for e in self.entries:
+            if e.target and e.target not in seen:
+                seen.append(e.target)
+        return seen
+
+    def by_file(self) -> List[Tuple[str, List[Entry]]]:
+        """Group entries per target, keeping the global order inside a file."""
+        groups: List[Tuple[str, List[Entry]]] = []
+        index: Dict[str, List[Entry]] = {}
+        for e in self.entries:
+            key = e.target or ""
+            if key not in index:
+                index[key] = []
+                groups.append((key, index[key]))
+            index[key].append(e)
+        return groups
 
     @property
     def sort_key(self):
@@ -93,6 +143,7 @@ class Collection:
             "patches": [
                 {"bundle": e.bundle_file, "order": e.order,
                  "required": e.required, "description": e.description,
+                 **({"target": e.target} if e.target else {}),
                  **({} if e.enabled else {"enabled": False})}
                 for e in self.entries
             ],
@@ -152,6 +203,11 @@ def load_collection(path: str, strict: bool = True) -> Collection:
             raise CollectionError(
                 "patch %d: bundle path %r must be relative to the collection "
                 "directory (absolute paths and '..' are refused)" % (i, bundle_file))
+        target_rel = item.get("target")
+        if target_rel is not None:
+            if not isinstance(target_rel, str):
+                raise CollectionError("patch %d: 'target' must be a string" % i)
+            target_rel = safe_relative(target_rel, "patch %d target" % i)
         bundle_path = os.path.join(base, bundle_file)
         try:
             bundle = Bundle.load(bundle_path, strict=strict)
@@ -165,9 +221,18 @@ def load_collection(path: str, strict: bool = True) -> Collection:
             enabled=bool(item.get("enabled", True)),
             bundle=bundle,
             path=bundle_path,
+            target=target_rel,
         ))
     if not entries:
         raise CollectionError("collection contains no patches")
+    with_target = [e for e in entries if e.target]
+    if with_target and len(with_target) != len(entries):
+        missing = [e.bundle_file for e in entries if not e.target]
+        raise CollectionError(
+            "mixed collection: %d patch(es) name a 'target' file but %s do not. "
+            "Either every patch names one (a vault over an application directory) "
+            "or none do (a single-target collection)"
+            % (len(with_target), ", ".join(missing[:3])))
     entries.sort(key=lambda e: (e.order, e.bundle.id if e.bundle else e.bundle_file))
     return Collection(
         name=str(raw.get("name") or os.path.splitext(os.path.basename(manifest))[0]),
@@ -212,6 +277,25 @@ def select(collection: Collection, target_path: str) -> Tuple[List[Entry], List[
 
 
 # --------------------------------------------------------------------------- #
+# member guards
+# --------------------------------------------------------------------------- #
+LAYOUT_OPS = {"append", "truncate", "extend-section", "add-section"}
+
+
+def _check_member(bundle: Bundle) -> None:
+    """Refuse members a collection cannot safely combine with others."""
+    ops = {h.op for h in bundle.hunks if h.enabled}
+    if ops & LAYOUT_OPS:
+        raise CollectionError(
+            "patch %s changes the size or layout of the file (%s); collections "
+            "require size-preserving patches so later RVAs stay valid — apply it "
+            "on its own" % (bundle.id, ", ".join(sorted(ops & LAYOUT_OPS))))
+    blocked = bundle.is_policy_blocked()
+    if blocked:
+        raise CollectionError("patch %s is policy-blocked: %s" % (bundle.id, blocked))
+
+
+# --------------------------------------------------------------------------- #
 # preflight
 # --------------------------------------------------------------------------- #
 def preflight(collection: Collection, target_path: str, require_signature: bool = False,
@@ -241,16 +325,7 @@ def preflight(collection: Collection, target_path: str, require_signature: bool 
         shutil.copyfile(target_path, simulated)
         for index, entry in enumerate(entries):
             bundle = entry.bundle
-            ops = {h.op for h in bundle.hunks if h.enabled}
-            if ops & {"append", "truncate"}:
-                raise CollectionError(
-                    "patch %s changes the file size; collections require "
-                    "size-preserving patches so later RVAs stay valid"
-                    % bundle.id)
-            blocked = bundle.is_policy_blocked()
-            if blocked:
-                raise CollectionError("patch %s is policy-blocked: %s"
-                                      % (bundle.id, blocked))
+            _check_member(bundle)
             # the first patch must match the pristine build exactly; after that
             # the hash is expected to differ (we verify bytes instead)
             plan = build_plan(bundle, simulated, accept_drift=index > 0,
@@ -299,10 +374,7 @@ def apply_collection(collection: Collection, target_path: str,
     original_sha = sha256_file(target)
     try:
         for index, entry in enumerate(entries):
-            blocked = entry.bundle.is_policy_blocked()
-            if blocked:
-                raise CollectionError("patch %s is policy-blocked: %s"
-                                      % (entry.bundle.id, blocked))
+            _check_member(entry.bundle)
             if index == 0:
                 if backup is None:
                     backup = journal.backup("collection:" + collection.name[:24])
@@ -359,4 +431,192 @@ def apply_collection(collection: Collection, target_path: str,
         "sha256_before": original_sha,
         "sha256_after": final_sha,
         "backup": backup,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# vaults: several binaries, one transaction
+# --------------------------------------------------------------------------- #
+def resolve_root(collection: Collection, root: str) -> str:
+    """Validate the application root and every target inside it."""
+    if not collection.is_vault:
+        raise CollectionError("collection %r is not a vault (no patch names a "
+                              "'target' file)" % collection.name)
+    root_abs = os.path.abspath(root)
+    if not os.path.isdir(root_abs):
+        raise CollectionError(
+            "vault collections patch a whole application directory; --target must "
+            "be that directory (%s is not a directory)" % root_abs)
+    real_root = os.path.realpath(root_abs)
+    for rel in collection.files():
+        path = os.path.join(root_abs, *rel.split("/"))
+        if not os.path.isfile(path):
+            raise CollectionError(
+                "patch target %r not found under %s (the vault expects the "
+                "application's own layout)" % (rel, root_abs))
+        real = os.path.realpath(path)
+        if os.path.dirname(real) != real_root and not real.startswith(real_root + os.sep):
+            raise CollectionError(
+                "patch target %r resolves outside %s (symlink escape refused)"
+                % (rel, root_abs))
+    return root_abs
+
+
+def _vault_plan(collection: Collection, root_abs: str) -> List[Tuple[str, str, List[Entry]]]:
+    """[(relative target, absolute path, applicable entries)] in manifest order."""
+    plan = []
+    for rel, entries in collection.by_file():
+        path = os.path.join(root_abs, *rel.split("/"))
+        sha = sha256_file(path)
+        applicable = [e for e in entries if e.enabled and matches(e.bundle, path, sha)]
+        plan.append((rel, path, applicable))
+    return plan
+
+
+def preflight_vault(collection: Collection, root: str,
+                    require_signature: bool = False,
+                    extra_trusted: Optional[List[str]] = None,
+                    allow_abs_address: bool = False) -> Dict[str, Any]:
+    """Dry-run every vault member on temp copies. Nothing outside the temp dir."""
+    root_abs = resolve_root(collection, root)
+    plan = _vault_plan(collection, root_abs)
+    report: Dict[str, Any] = {"vault": collection.name, "root": root_abs,
+                              "files": [], "skipped": [], "warnings": []}
+    for rel, entries in collection.by_file():
+        applicable = next(p[2] for p in plan if p[0] == rel)
+        if not applicable:
+            report["skipped"].append({"file": rel, "reason": "target mismatch"})
+    if not any(p[2] for p in plan):
+        raise CollectionError(
+            "no patch in vault %r applies to any file under %s"
+            % (collection.name, root_abs))
+
+    workdir = tempfile.mkdtemp(prefix="surreal-vault-")
+    try:
+        for rel, path, entries in plan:
+            if not entries:
+                continue
+            for entry in entries:
+                _check_member(entry.bundle)
+            simulated = os.path.join(workdir, rel.replace("/", "_"))
+            shutil.copyfile(path, simulated)
+            applied = []
+            for index, entry in enumerate(entries):
+                member_plan = build_plan(
+                    entry.bundle, simulated, accept_drift=index > 0,
+                    require_signature=require_signature,
+                    extra_trusted=extra_trusted,
+                    allow_abs_address=allow_abs_address)
+                apply_bundle(entry.bundle, simulated, accept_drift=index > 0,
+                             no_backup=True, no_checksum=True,
+                             require_signature=require_signature,
+                             extra_trusted=extra_trusted,
+                             allow_abs_address=allow_abs_address, force_unlock=True)
+                applied.append({"bundle": entry.bundle.id,
+                                "hunks": len(member_plan.resolved),
+                                "signature": (member_plan.signature or {}).get("state", "unknown")})
+                if index == 0:
+                    report["warnings"].extend(member_plan.warnings)
+            report["files"].append({"file": rel, "patches": applied,
+                                    "result_sha256": sha256_file(simulated)})
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    return report
+
+
+def _restore(path: str, backup: str, want_sha: str) -> bool:
+    """Atomically copy ``backup`` back over ``path`` and verify the hash."""
+    directory = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(prefix=".surreal-rollback-", dir=directory)
+    os.close(fd)
+    try:
+        shutil.copyfile(backup, tmp)
+        os.replace(tmp, path)
+        fsync_dir(directory)
+        return sha256_file(path) == want_sha
+    except OSError:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def apply_vault(collection: Collection, root: str,
+                require_signature: bool = False,
+                extra_trusted: Optional[List[str]] = None,
+                allow_abs_address: bool = False,
+                keep_backups: int = 3) -> Dict[str, Any]:
+    """Patch every file in the vault; restore *all* of them if any step fails."""
+    root_abs = resolve_root(collection, root)
+    plan = _vault_plan(collection, root_abs)
+    if not any(p[2] for p in plan):
+        raise CollectionError(
+            "no patch in vault %r applies to any file under %s"
+            % (collection.name, root_abs))
+
+    results: List[Dict[str, Any]] = []
+    touched: List[Tuple[str, str, str]] = []   # (path, backup, sha_before)
+    try:
+        for rel, path, entries in plan:
+            if not entries:
+                continue
+            backup = None
+            original_sha = sha256_file(path)
+            applied = []
+            for index, entry in enumerate(entries):
+                _check_member(entry.bundle)
+                if backup is None:
+                    backup = Journal(path).backup("vault:" + collection.name[:20])
+                    touched.append((path, backup, original_sha))
+                result = apply_bundle(
+                    entry.bundle, path, accept_drift=index > 0, no_backup=True,
+                    keep_backups=0, require_signature=require_signature,
+                    extra_trusted=extra_trusted,
+                    allow_abs_address=allow_abs_address)
+                applied.append({
+                    "bundle": entry.bundle.id,
+                    "sha256_before": result["sha256_before"],
+                    "sha256_after": result["sha256_after"],
+                    "hunks": result["hunks"],
+                })
+            final_sha = sha256_file(path)
+            # a fresh Journal: apply_bundle wrote its own per-patch entries since
+            # the backup was taken, and a cached instance would drop them
+            Journal(path).record(
+                "apply-vault", collection=collection.name,
+                collection_file=collection.path, file=rel, backup=backup,
+                sha256_before=original_sha, sha256_after=final_sha,
+                patches=[a["bundle"] for a in applied],
+                vault_files=collection.files())
+            results.append({"file": rel, "target": path, "backup": backup,
+                            "applied": applied, "sha256_before": original_sha,
+                            "sha256_after": final_sha})
+    except BaseException as exc:
+        restored, failed = [], []
+        for path, backup, sha_before in reversed(touched):
+            ok = bool(backup) and os.path.isfile(backup) and _restore(path, backup, sha_before)
+            (restored if ok else failed).append(path)
+            Journal(path).record("vault-rollback", collection=collection.name,
+                           backup=backup, restored=ok,
+                           sha256_after=sha256_file(path) if os.path.isfile(path) else None,
+                           error=str(exc))
+        message = "%s\n  → %d file(s) touched; %s" % (
+            exc, len(touched),
+            "all restored from backup" if not failed
+            else "ROLLBACK FAILED for %s — restore manually" % ", ".join(failed))
+        raise CollectionError(message) from exc
+
+    if keep_backups > 0:
+        for _rel, path, _entries in plan:
+            if os.path.isfile(path):
+                Journal(path).prune(keep_backups)
+    return {
+        "collection": collection.name,
+        "root": root_abs,
+        "vault": True,
+        "files": results,
+        "skipped": [{"file": rel, "reason": "target mismatch or disabled"}
+                    for rel, _path, entries in plan if not entries],
     }

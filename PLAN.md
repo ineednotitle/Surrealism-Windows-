@@ -387,7 +387,20 @@ Not done, and deliberately so: moving an existing section, inserting a section
 in the middle, rewriting relocations, or changing the entry point. Those need a
 real linker and are the point where a byte-patcher should stop pretending.
 
-Next: multi-file vaults (several binaries per collection), TUI, repo client.
+### M3 (shipped in v0.5) — multi-file vaults
+
+A collection whose patch entries each carry a relative `target` path becomes a
+**vault**: `surreal collection apply vault/ --target "C:/Apps/App"` patches every
+named binary as one transaction. Each file gets its own backup and its own
+journal entry (`apply-vault`), so `surreal revert <file>` still works per file,
+while a failure anywhere restores every file already touched. Target paths are
+confined to the root (absolute, `..` and symlink escapes refused), members must
+still be size-preserving, and mixing vault/non-vault entries is an error. The
+per-directory journal is now filtered by target path, which is what lets two
+binaries in the same folder keep separate histories.
+
+Next: patch dependencies/conflicts, optional sandboxed patch scripting, TUI, a
+local-only repo client.
 
 ## 7. Milestones
 
@@ -396,7 +409,7 @@ Next: multi-file vaults (several binaries per collection), TUI, repo client.
 | **M0 (this PR)** | plan, PE parser, scanner, diff→bundle, apply/revert/journal, policy gate, docs, CI, exe build | `python -m unittest` green on Windows & Linux; a bundle round-trips on a synthetic PE |
 | M1 | ed25519 `.morph` signatures (pure-Python, no dependency), trusted-key store, apply lock, ASLR/relocation checks, `--max-mem` | bundles are tamper-evident and safe on relocatable images — **done (v0.2)** |
 | M2 | size-changing patches (append overlay — **done v0.3**; extend/add section — **done v0.5**), manifest/vault for multi-file apps | patch a 3-file app atomically |
-| M3 | optional patch scripting (sandboxed, no shell), patch dependencies/conflicts | community patch repo works |
+| M3 | multi-file vaults (**done v0.5**), patch dependencies/conflicts, optional patch scripting (sandboxed, no shell) | community patch repo works |
 | M4 | TUI (`--tui`) + patch repository client (`apply --repo repo.json`) | one-command "apply all trusted bundles" |
 
 ## 8. Risks & mitigations

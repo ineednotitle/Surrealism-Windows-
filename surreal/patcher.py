@@ -782,7 +782,8 @@ def revert(target_path: str, force_unlock: bool = False) -> Dict[str, Any]:
 
 def _revert_locked(target: str) -> Dict[str, Any]:
     journal = Journal(target)
-    entry = journal.last(actions=("apply", "apply-collection", "revert"))
+    entry = journal.last(actions=("apply", "apply-collection", "apply-vault",
+                                  "revert"))
     if entry is None:
         raise PatchError("no journal entries for %s — nothing to revert" % target, code=3)
     if entry.get("action") == "revert":

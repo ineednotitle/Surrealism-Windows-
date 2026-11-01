@@ -702,9 +702,13 @@ def cmd_collection(args, console: Console) -> int:
             console.kv("description", coll.description)
         console.kv("manifest", coll.path)
         console.kv("patches", len(coll.entries))
+        if coll.is_vault:
+            console.kv("kind", "vault (%d file(s) under one transaction)"
+                       % len(coll.files()))
         for e in coll.entries:
-            console.say("  [%3d] %-44s %s" % (e.order, e.bundle.id,
-                                              e.bundle_file))
+            console.say("  [%3d] %-44s %s%s"
+                        % (e.order, e.bundle.id, e.bundle_file,
+                           "  →  %s" % e.target if e.target else ""))
             if e.description:
                 console.say("        · %s" % e.description)
             if not e.enabled:
@@ -716,12 +720,85 @@ def cmd_collection(args, console: Console) -> int:
                             % (e.bundle.signer(), "" if trusted
                                else "  (NOT trusted)"))
         console.say("")
-        console.say("  next: surreal collection check %s --target app.exe"
-                    % os.path.basename(os.path.dirname(coll.path) or "."))
+        console.say("  next: surreal collection check %s --target %s"
+                    % (os.path.basename(os.path.dirname(coll.path) or "."),
+                       "<app directory>" if coll.is_vault else "app.exe"))
         return EXIT_OK
 
     # check / apply need a target
     target = args.target
+    if not target:
+        return _die(console, "collection %s requires --target%s"
+                    % (args.action, " (the application directory)" if coll.is_vault
+                       else " (the binary to patch)"), EXIT_USAGE)
+    if coll.is_vault:
+        if args.action == "check":
+            try:
+                report = collections.preflight_vault(
+                    coll, target, require_signature=args.require_signature,
+                    extra_trusted=args.trusted_key,
+                    allow_abs_address=args.allow_abs_address)
+            except (collections.CollectionError, patcher.PatchError) as exc:
+                return _die(console, str(exc), getattr(exc, "code", EXIT_MISMATCH))
+            if console.json_mode:
+                console.emit_json({"ok": True, "collection": coll.name,
+                                   "report": report})
+                return EXIT_OK
+            console.head(BANNER)
+            console.ok("vault %r applies cleanly to %d file(s) under %s"
+                       % (coll.name, len(report["files"]), report["root"]))
+            for item in report["files"]:
+                console.say("    · %-32s %d patch(es)" % (item["file"],
+                                                         len(item["patches"])))
+                for patch in item["patches"]:
+                    console.say("        · %-38s %2d hunk(s)  signature: %s"
+                                % (patch["bundle"], patch["hunks"],
+                                   patch["signature"]))
+                console.say("        · result sha256 %s"
+                            % item["result_sha256"][:16] + "…")
+            for item in report["skipped"]:
+                console.warn("skipped %s (%s)" % (item["file"], item["reason"]))
+            for warn in report["warnings"]:
+                console.warn(warn)
+            console.say("\n  run: surreal collection apply %s --target %s"
+                        % (os.path.basename(os.path.dirname(coll.path) or "."),
+                           report["root"]))
+            return EXIT_OK
+
+        try:
+            policy.require_acceptance()
+        except PermissionError as exc:
+            return _die(console, str(exc), EXIT_POLICY)
+        if not args.yes and not console.json_mode:
+            if not _confirm(console, "apply vault %r to %s?"
+                            % (coll.name, os.path.abspath(target)), args.yes):
+                console.err("aborted (no changes written)")
+                return EXIT_MISMATCH
+        try:
+            vresult = collections.apply_vault(
+                coll, target, require_signature=args.require_signature,
+                extra_trusted=args.trusted_key,
+                allow_abs_address=args.allow_abs_address,
+                keep_backups=args.keep_backups)
+        except (collections.CollectionError, patcher.PatchError) as exc:
+            return _die(console, str(exc), getattr(exc, "code", EXIT_IO))
+        except OSError as exc:
+            return _die(console, "IO error: %s" % exc, EXIT_IO)
+        if console.json_mode:
+            console.emit_json({"ok": True, **vresult})
+            return EXIT_OK
+        console.head(BANNER)
+        console.ok("applied vault %r to %d file(s)" % (coll.name,
+                                                       len(vresult["files"])))
+        for item in vresult["files"]:
+            console.say("    · %-32s %d patch(es)  %s…"
+                        % (item["file"], len(item["applied"]),
+                           item["sha256_after"][:8]))
+        for item in vresult["skipped"]:
+            console.warn("skipped %s (%s)" % (item["file"], item["reason"]))
+        console.say("\n  undo one file with: surreal revert <file>")
+        return EXIT_OK
+
     if args.action == "check":
         try:
             report = collections.preflight(

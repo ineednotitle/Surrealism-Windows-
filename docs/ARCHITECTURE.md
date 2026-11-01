@@ -11,7 +11,8 @@
 | `surreal/diffgen.py` | before/after → hunks, anchor selection with uniqueness proof | write to the target |
 | `surreal/patcher.py` | plan → verify → backup → patch copy → checksum → atomic swap | skip verification |
 | `surreal/surgery.py` | plan + post-write proof for the two header-surgery ops (`extend-section`, `add-section`) | execute anything, touch overlays |
-| `surreal/journal.py` | `<dir>/.surreal/journal.json` + `backups/` | lose a backup silently |
+| `surreal/collection.py` | collections + multi-file vaults: selection, ordering, preflight on temp copies, transactional apply with rollback | patch anything outside the manifest's own directory tree |
+| `surreal/journal.py` | `<dir>/.surreal/journal.json` + `backups/` (one journal per directory, filtered per target file) | lose a backup silently |
 | `surreal/policy.py` | acceptable-use acknowledgement gate | nag twice |
 | `surreal/testkit.py` | synthetic PE builder, `selftest`, demo fixtures | ship real binaries |
 | `surreal/util.py` | hex parsing, hashing, atomic JSON IO, hexdump | hold global state |

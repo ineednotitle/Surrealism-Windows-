@@ -82,10 +82,21 @@ class Journal:
         self.save()
         return entry
 
-    def last(self, actions=("apply", "apply-collection", "revert")) -> Optional[Dict[str, Any]]:
+    def last(self, actions=("apply", "apply-collection", "apply-vault",
+                            "revert")) -> Optional[Dict[str, Any]]:
+        """Newest entry for *this* file.
+
+        One journal covers a whole directory, so a vault (several binaries side
+        by side) writes one entry per file into the same file: entries that name
+        a different target are skipped.
+        """
         for entry in reversed(self.entries):
-            if entry.get("action") in actions:
-                return entry
+            if entry.get("action") not in actions:
+                continue
+            recorded = entry.get("target")
+            if recorded and os.path.abspath(recorded) != self.target_path:
+                continue
+            return entry
         return None
 
     def prune(self, keep: int = 3) -> List[str]:

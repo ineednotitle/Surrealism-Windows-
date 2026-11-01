@@ -66,6 +66,46 @@ jobs:
           python -m surreal apply examples/demo-extend-section.morph --target demo-out/demo_app.exe -y
           python -m surreal inspect demo-out/demo_app.exe --json > after.json
           python -m surreal revert demo-out/demo_app.exe
+      - name: Vault smoke (multi-file, M3)
+        run: |
+          python - <<'EOF'
+          import json, os, shutil, sys
+          sys.path.insert(0, ".")
+          from surreal.testkit import build_pe
+          from surreal.diffgen import build_bundle
+
+          os.makedirs("vault-out/app", exist_ok=True)
+          os.makedirs("vault-out/vault", exist_ok=True)
+          shutil.copyfile("demo-out/demo_app.exe", "vault-out/app/main.exe")
+          helper = build_pe([(".text", b"\x90" * 0x100, 0x60000020),
+                             (".rdata", b"helper-strings\0" * 8, 0x40000040)])
+          with open("vault-out/app/helper.dll", "wb") as fh:
+              fh.write(helper)
+          shutil.copyfile("demo-out/demo-shorten-nag.morph",
+                          "vault-out/vault/main.morph")
+          fixed = bytearray(helper)
+          at = bytes(fixed).find(b"helper-strings")
+          fixed[at:at + 14] = b"VAULT-STRINGS!"
+          with open("vault-out/helper_fixed.dll", "wb") as fh:
+              fh.write(bytes(fixed))
+          bundle, _ = build_bundle("vault-out/app/helper.dll",
+                                   "vault-out/helper_fixed.dll",
+                                   "org.ci.vault-helper", "helper")
+          bundle.save("vault-out/vault/helper.morph")
+          with open("vault-out/vault/surreal-collection.json", "w") as fh:
+              json.dump({"format": "surreal.collection", "format_version": 1,
+                         "name": "ci vault",
+                         "patches": [
+                             {"bundle": "main.morph", "target": "main.exe", "order": 10},
+                             {"bundle": "helper.morph", "target": "helper.dll",
+                              "order": 20}]}, fh, indent=2)
+          EOF
+          python -m surreal collection list vault-out/vault
+          python -m surreal collection check vault-out/vault --target vault-out/app
+          python -m surreal init --accept-policy
+          python -m surreal collection apply vault-out/vault --target vault-out/app -y
+          python -m surreal revert vault-out/app/main.exe
+          python -m surreal revert vault-out/app/helper.dll
       - name: Performance budget
         run: python tools/bench.py --mb 32
 

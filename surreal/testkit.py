@@ -485,6 +485,72 @@ def run_selftest(keep: bool = False, workdir: Optional[str] = None,
 
         step("collection apply + revert (transactional)", _collection)
 
+        def _vault():
+            import json as _json
+
+            from . import collection as coll
+
+            vaultdir = os.path.join(base, "vault")
+            os.makedirs(vaultdir, exist_ok=True)
+            appdir = os.path.join(base, "app")
+            os.makedirs(appdir, exist_ok=True)
+            main = os.path.join(appdir, "main.exe")
+            shutil.copyfile(old, main)
+            helper_bytes = build_pe([(".text", b"\x90" * 0x100, 0x60000020),
+                                     (".rdata", b"helper-strings\0" * 8, 0x40000040)])
+            helper = os.path.join(appdir, "helper.dll")
+            with open(helper, "wb") as fh:
+                fh.write(helper_bytes)
+
+            with open(main, "rb") as fh:
+                main_bytes = fh.read()
+            fixed_main = os.path.join(base, "main_fixed.exe")
+            data = bytearray(main_bytes)
+            data[0x251] = 0x7E          # same edit the demo bundle makes
+            with open(fixed_main, "wb") as fh:
+                fh.write(bytes(data))
+            mb, _ = diffgen.build_bundle(main, fixed_main,
+                                         "org.surreal.selftest.vault-main", "vault-main")
+            mb.save(os.path.join(vaultdir, "vault-main.morph"))
+
+            fixed_helper = os.path.join(base, "helper_fixed.dll")
+            payload = bytearray(helper_bytes)
+            at = bytes(payload).find(b"helper-strings")
+            payload[at:at + len(b"helper-strings")] = b"VAULT-STRINGS!"
+            with open(fixed_helper, "wb") as fh:
+                fh.write(bytes(payload))
+            hb, _ = diffgen.build_bundle(helper, fixed_helper,
+                                         "org.surreal.selftest.vault-helper",
+                                         "vault-helper")
+            hb.save(os.path.join(vaultdir, "vault-helper.morph"))
+
+            manifest = {
+                "format": "surreal.collection", "format_version": 1,
+                "name": "selftest vault",
+                "patches": [
+                    {"bundle": "vault-main.morph", "target": "main.exe", "order": 10},
+                    {"bundle": "vault-helper.morph", "target": "helper.dll",
+                     "order": 20},
+                ],
+            }
+            mpath = os.path.join(vaultdir, "surreal-repo.json")
+            with open(mpath, "w", encoding="utf-8") as fh:
+                _json.dump(manifest, fh, indent=2)
+            c = coll.load_collection(vaultdir)
+            if not c.is_vault or len(c.files()) != 2:
+                raise AssertionError("vault loading did not group two files")
+            before = (sha256_file(main), sha256_file(helper))
+            res = coll.apply_vault(c, appdir)
+            if len(res["files"]) != 2:
+                raise AssertionError("expected 2 files, patched %d" % len(res["files"]))
+            for path in (main, helper):
+                patcher.revert(path)
+            if (sha256_file(main), sha256_file(helper)) != before:
+                raise AssertionError("vault rollback/revert did not restore both files")
+            return "2 files patched in one transaction, both reverted"
+
+        step("vault apply + per-file revert (multi-file)", _vault)
+
         def _bad_bundle():
             bad = os.path.join(base, "bad.morph")
             with open(bad, "w", encoding="utf-8") as fh:

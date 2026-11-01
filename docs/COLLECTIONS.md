@@ -64,6 +64,54 @@ Two rules make this safe:
    lands ("hash drift accepted" warning); their per-hunk `expect` bytes — the
    actual proof of correctness — are still verified in full.
 
+## Vaults: several binaries, one transaction (v0.5)
+
+Real apps ship as a handful of files (`app.exe` + `helper.dll` + plugins). If
+**every** patch entry names a `target`, the collection becomes a **vault**: you
+point `--target` at the application directory and the set is applied across
+files:
+
+```json
+{
+  "format": "surreal.collection",
+  "format_version": 1,
+  "name": "BetterApp vault",
+  "patches": [
+    { "bundle": "main-theme.morph",   "target": "app.exe",          "order": 10 },
+    { "bundle": "plugin-fix.morph",   "target": "plugins/scan.dll", "order": 20 },
+    { "bundle": "helper-clean.morph", "target": "bin/helper.exe",   "order": 30 }
+  ]
+}
+```
+
+```bash
+surreal collection list  vault/                          # shows the file of each patch
+surreal collection check vault/ --target "C:/Apps/BetterApp"
+surreal collection apply vault/ --target "C:/Apps/BetterApp" -y
+surreal revert "C:/Apps/BetterApp/bin/helper.exe"        # per file
+```
+
+Rules:
+
+* **All or nothing, across files.** Each file gets its own backup before its
+  first patch; if any file fails, every file touched so far is restored, and each
+  one's journal records a `vault-rollback`. The message names what could not be
+  restored if the rollback itself fails.
+* **One journal entry per file**, `action: "apply-vault"`, listing every file in
+  the vault. So `surreal revert <file>` undoes that file (the same directory's
+  journal is filtered by target path, so two binaries side by side do not
+  confuse each other).
+* **Paths stay inside the root.** Absolute paths, drive letters and `..` are
+  refused, and a target that resolves outside the root through a symlink is
+  refused too.
+* **Still size-preserving only.** Vault members may not use `append`,
+  `truncate`, `extend-section` or `add-section` — apply a layout change on its
+  own, outside the vault.
+* Mixing vault and non-vault entries in one manifest is an error: either every
+  patch names a target or none does.
+* Files with no matching patch (wrong build, disabled entry) are *skipped and
+  reported*, not treated as failures.
+
 ## Safety notes
 
 * `collection check` runs the whole set against a copy in your temp directory and
@@ -73,7 +121,8 @@ Two rules make this safe:
 * Paths inside the manifest must be relative and cannot contain `..`, so a
   downloaded collection cannot reach outside its own directory.
 * `revert` restores the single backup, which undoes every patch in the set at
-  once (the journal records the ordered bundle ids).
+  once (the journal records the ordered bundle ids). For a vault, revert each
+  file — the backups are per file.
 
 ## Authoring tips
 
