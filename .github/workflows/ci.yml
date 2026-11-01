@@ -34,36 +34,11 @@ jobs:
         run: |
           set -o pipefail
           python run_tests.py -v 2>&1 | tee unit-tests.log
-      - name: Surface failing tests (annotations)
-        if: failure()
+      - name: Self test (build → diff → check → apply → revert)
         shell: bash
         run: |
-          python - <<'EOF'
-          import os, re
-          path = "unit-tests.log"
-          if not os.path.isfile(path):
-              print("::error::no unit-tests.log was produced")
-              raise SystemExit(0)
-          text = open(path, encoding="utf-8", errors="replace").read()
-          blocks = re.split(r"^={70}$", text, flags=re.M)
-          shown = 0
-          for block in blocks:
-              head = re.search(r"^(FAIL|ERROR): (\S+) \((\S+)\)", block, re.M)
-              if not head:
-                  continue
-              detail = block.strip().splitlines()[-6:]
-              message = " | ".join(line.strip() for line in detail if line.strip())
-              message = message.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
-              print("::error title=%s %s::%s" % (head.group(1), head.group(2), message[:900]))
-              shown += 1
-              if shown >= 8:
-                  break
-          if not shown:
-              tail = " | ".join(text.strip().splitlines()[-8:])
-              print("::error title=tests::%s" % tail[:900].replace("%", "%25"))
-          EOF
-      - name: Self test (build → diff → check → apply → revert)
-        run: python -m surreal selftest
+          set -o pipefail
+          python -m surreal selftest 2>&1 | tee selftest.log
       - name: CLI smoke
         run: |
           python -m surreal --help
@@ -148,6 +123,35 @@ jobs:
         run: python tools/smoke_real_binary.py demo-out/demo_app.exe
       - name: Performance budget
         run: python tools/bench.py --mb 32
+      - name: Surface failures as annotations
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f selftest.log ]; then
+            grep -E "^[[:space:]]*FAIL " selftest.log | head -8 | while IFS= read -r line; do
+              echo "::error title=selftest::${line}"
+            done || true
+          fi
+          python - <<'EOF'
+          import os, re
+          path = "unit-tests.log"
+          if not os.path.isfile(path):
+              raise SystemExit(0)
+          text = open(path, encoding="utf-8", errors="replace").read()
+          blocks = re.split(r"^={70}$", text, flags=re.M)
+          shown = 0
+          for block in blocks:
+              head = re.search(r"^(FAIL|ERROR): (\S+) \((\S+)\)", block, re.M)
+              if not head:
+                  continue
+              detail = block.strip().splitlines()[-6:]
+              message = " | ".join(line.strip() for line in detail if line.strip())
+              message = message.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+              print("::error title=%s %s::%s" % (head.group(1), head.group(2), message[:900]))
+              shown += 1
+              if shown >= 8:
+                  break
+          EOF
 
   lint:
     name: static checks
