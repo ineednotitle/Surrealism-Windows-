@@ -82,7 +82,7 @@ class Journal:
         self.save()
         return entry
 
-    def last(self, actions=("apply", "revert")) -> Optional[Dict[str, Any]]:
+    def last(self, actions=("apply", "apply-collection", "revert")) -> Optional[Dict[str, Any]]:
         for entry in reversed(self.entries):
             if entry.get("action") in actions:
                 return entry

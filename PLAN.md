@@ -335,8 +335,19 @@ of the mapped image, so no header, section-table or RVA edit is needed.
   and EOF ops (`diff --force`), with read-back verification instead of a PE
   checksum.
 
+### M3-lite (shipped in v0.4) — collections
+
+`surreal collection list|check|apply` applies an ordered set of bundles to one
+binary as a single transaction: preflight on a temp copy, one backup, one journal
+entry, rollback on any failure. Members must be size-preserving (otherwise the
+RVAs later patches were authored against would move); the first member must match
+the pristine hash, later members are hash-drifted by design but keep full
+per-hunk byte verification. Manifest paths are confined to the collection
+directory (no absolute paths, no `..`).
+
 Deferred to M2+: `extend-section` / `add-section` with header rewriting and
-relocation fixups; then multi-file vaults, TUI, repo client.
+relocation fixups; then multi-file vaults (several binaries per collection),
+TUI, repo client.
 
 ## 7. Milestones
 

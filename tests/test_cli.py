@@ -344,6 +344,80 @@ class TestCli(TempDirCase):
         self.assertEqual(code, 0, out)
         self.assertIn("aslr", out.lower())
 
+    # -- M3: collections ----------------------------------------------------- #
+    def make_collection(self, name="CLI set"):
+        import json as _json
+        pdir = self.path("set")
+        os.makedirs(pdir, exist_ok=True)
+        # two bundles, both authored against self.app, editing disjoint bytes
+        versioned = bytearray(sample_app())
+        needle = b"Version 1.0.0 build 2026-11-01"
+        at = bytes(versioned).find(needle)
+        self.assertGreater(at, 0)
+        versioned[at:at + len(needle)] = b"\0" * len(needle)
+        variants = {"one": sample_app(patch=True), "two": bytes(versioned)}
+        patches = []
+        for i, (key, blob) in enumerate(sorted(variants.items()), start=1):
+            mod = write(self.path("mod_%s.exe" % key), blob)
+            code, out, err = run("diff", self.app, mod, "-o",
+                                 os.path.join(pdir, key + ".morph"),
+                                 "--id", "org.cli." + key, "--json")
+            self.assertEqual(code, 0, err)
+            patches.append({"bundle": key + ".morph", "order": i * 10})
+        with open(os.path.join(pdir, "surreal-collection.json"), "w",
+                  encoding="utf-8") as fh:
+            _json.dump({"format": "surreal.collection", "format_version": 1,
+                        "name": name, "patches": patches}, fh, indent=2)
+        return pdir
+
+    def test_collection_list(self):
+        pdir = self.make_collection()
+        code, out, err = run("collection", "list", pdir)
+        self.assertEqual(code, 0, err)
+        self.assertIn("CLI set", out)
+        self.assertIn("org.cli.one", out)
+
+    def test_collection_check_and_apply_and_revert(self):
+        pdir = self.make_collection()
+        run("init", "--accept-policy")
+        before = sha256_file(self.app)
+        code, out, err = run("collection", "check", pdir, "--target", self.app)
+        self.assertEqual(code, 0, err)
+        self.assertIn("apply cleanly", out)
+        code, out, err = run("collection", "apply", pdir, "--target", self.app, "-y",
+                             "--json")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(len(result["applied"]), 2)
+        code, out, err = run("revert", self.app)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sha256_file(self.app), before)
+
+    def test_collection_apply_requires_policy(self):
+        pdir = self.make_collection()
+        code, _, err = run("collection", "apply", pdir, "--target", self.app, "-y")
+        self.assertEqual(code, 4)
+
+    def test_collection_apply_aborts_without_yes(self):
+        pdir = self.make_collection()
+        run("init", "--accept-policy")
+        before = sha256_file(self.app)
+        code, _, err = run("collection", "apply", pdir, "--target", self.app)
+        self.assertEqual(code, 3)
+        self.assertIn("aborted", err)
+        self.assertEqual(sha256_file(self.app), before)
+
+    def test_collection_check_wrong_target(self):
+        pdir = self.make_collection()
+        other = write(self.path("other.exe"), sample_app(is_64=False))
+        code, _, err = run("collection", "check", pdir, "--target", other)
+        self.assertEqual(code, 3)
+        self.assertIn("no patch", err)
+
+    def test_collection_missing_manifest(self):
+        code, _, err = run("collection", "list", self.path("nothing-here"))
+        self.assertEqual(code, 3)
+
     # -- misc --------------------------------------------------------------- #
     def test_version_and_help(self):
         code, out, _ = run("--version")

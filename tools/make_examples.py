@@ -66,6 +66,51 @@ def main() -> int:
         overlay.save(out2)
         print("wrote %s (%d hunk, %+d bytes)" % (out2, len(overlay.hunks),
                                                  ostats["size_delta"]))
+
+        # a third, size-preserving bundle: blank the version string
+        versioned = bytearray(base)
+        needle = b"Version 1.0.0 build 2026-11-01"
+        at = versioned.find(needle)
+        if at >= 0:
+            versioned[at:at + len(needle)] = b"\0" * len(needle)
+            modified = os.path.join(tmp, "demo_app_noversion.exe")
+            with open(modified, "wb") as fh:
+                fh.write(bytes(versioned))
+            vb, _ = build_bundle(
+                old, modified,
+                bundle_id="org.surreal.demo.blank-version",
+                name="Demo: blank the version string",
+                author="surreal demo",
+                description="Hides the build string in .rdata. Size-preserving, so "
+                            "it can be combined with other patches in a collection.",
+                created_utc="2026-11-01T00:00:00Z",
+            )
+            out3 = os.path.join(EXAMPLES, "demo-blank-version.morph")
+            vb.save(out3)
+            print("wrote %s (%d hunk(s))" % (out3, len(vb.hunks)))
+
+        # a collection applying two size-preserving bundles in one transaction
+        manifest = {
+            "format": "surreal.collection",
+            "format_version": 1,
+            "name": "Surrealism Window demo set",
+            "description": ("Two size-preserving demo patches for the generated "
+                            "demo_app.exe, applied as one transaction."),
+            "author": "surreal demo",
+            "patches": [
+                {"bundle": "demo-shorten-nag.morph", "order": 10,
+                 "description": "invert a branch and blank the nag string"},
+                {"bundle": "demo-blank-version.morph", "order": 20,
+                 "description": "blank the version string"},
+            ],
+        }
+        import json as _json
+
+        path = os.path.join(EXAMPLES, "surreal-collection.json")
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            _json.dump(manifest, fh, indent=2)
+            fh.write("\n")
+        print("wrote %s (%d patches)" % (path, len(manifest["patches"])))
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -1,0 +1,19 @@
+{
+  "format": "surreal.collection",
+  "format_version": 1,
+  "name": "Surrealism Window demo set",
+  "description": "Two size-preserving demo patches for the generated demo_app.exe, applied as one transaction.",
+  "author": "surreal demo",
+  "patches": [
+    {
+      "bundle": "demo-shorten-nag.morph",
+      "order": 10,
+      "description": "invert a branch and blank the nag string"
+    },
+    {
+      "bundle": "demo-blank-version.morph",
+      "order": 20,
+      "description": "blank the version string"
+    }
+  ]
+}

@@ -27,6 +27,28 @@ each hunk carries an `anchor`, a corroborating `section`+`rva`, a raw `offset`,
 the exact `expect` bytes and the `replace` bytes: four independent witnesses to
 the same edit, all of which must agree.
 
+## `demo-append-overlay.morph`
+
+A size-changing bundle: it appends 88 bytes of overlay after the last section
+(`op: "append"`). Overlay growth is the only size change that needs no header,
+section-table or RVA edits. Its inverse (`op: "truncate"`) removes the same bytes
+again — build it with `surreal diff grown.exe demo_app.exe -o remove.morph`.
+
+## `surreal-collection.json`
+
+A two-patch transaction over the same generated app:
+
+```bash
+python -m surreal demo --out /tmp/demo
+python -m surreal collection check examples --target /tmp/demo/demo_app.exe
+python -m surreal init --accept-policy
+python -m surreal collection apply examples --target /tmp/demo/demo_app.exe -y
+python -m surreal revert /tmp/demo/demo_app.exe
+```
+
+Collections refuse size-changing members (see `docs/COLLECTIONS.md`), which is
+why the overlay example is not part of the set.
+
 ## Adding your own
 
 1. `surreal diff old.exe fixed.exe -o my-patch.morph --id com.you.name`

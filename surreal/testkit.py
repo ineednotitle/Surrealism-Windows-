@@ -397,6 +397,53 @@ def run_selftest(keep: bool = False, workdir: Optional[str] = None,
 
         step("overlay size change (append + revert)", _overlay_append)
 
+        def _collection():
+            import json as _json
+
+            from . import collection as coll
+
+            with open(old, "rb") as fh:
+                base_bytes = fh.read()
+            versioned = bytearray(base_bytes)
+            needle = b"Version 1.0.0 build 2026-11-01"
+            at = bytes(versioned).find(needle)
+            if at < 0:
+                raise AssertionError("fixture lost its version string")
+            versioned[at:at + len(needle)] = b"\0" * len(needle)
+            mod = os.path.join(base_dir, "noversion.exe")
+            with open(mod, "wb") as fh:
+                fh.write(bytes(versioned))
+            vb, _ = diffgen.build_bundle(old, mod, "org.surreal.selftest.version",
+                                         "version")
+            vb.save(os.path.join(base_dir, "version.morph"))
+            nag = Bundle.load(bundle_path)
+            if nag.signature:
+                # the signed bundle from the previous step is fine too
+                pass
+            manifest = {
+                "format": "surreal.collection", "format_version": 1,
+                "name": "selftest set",
+                "patches": [
+                    {"bundle": os.path.basename(bundle_path), "order": 10},
+                    {"bundle": "version.morph", "order": 20},
+                ],
+            }
+            mpath = os.path.join(base_dir, "surreal-collection.json")
+            with open(mpath, "w", encoding="utf-8") as fh:
+                _json.dump(manifest, fh, indent=2)
+            c = coll.load_collection(base_dir)
+            before = sha256_file(old)
+            res = coll.apply_collection(c, old)
+            if len(res["applied"]) != 2:
+                raise AssertionError("expected 2 patches, applied %d"
+                                     % len(res["applied"]))
+            patcher.revert(old)
+            if sha256_file(old) != before:
+                raise AssertionError("collection revert did not restore the file")
+            return "2 patches applied as one transaction, revert restored"
+
+        step("collection apply + revert (transactional)", _collection)
+
         def _bad_bundle():
             bad = os.path.join(base, "bad.morph")
             with open(bad, "w", encoding="utf-8") as fh:

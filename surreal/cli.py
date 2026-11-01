@@ -20,6 +20,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from . import FORMAT_NAME, TOOL_NAME, __version__
+from . import collection as collections
 from . import diffgen, keys, memguard, patcher, policy, scanner
 from .patchfile import Bundle, BundleError
 from .pe import PE, PEError
@@ -522,7 +523,10 @@ def cmd_revert(args, console: Console) -> int:
     console.head(BANNER)
     console.ok("restored %s" % os.path.basename(result["target"]))
     console.kv("sha256", result["restored_sha256"])
-    console.kv("reverted bundle", result.get("bundle_id") or "-")
+    if result.get("collection"):
+        console.kv("reverted collection", result["collection"])
+    else:
+        console.kv("reverted bundle", result.get("bundle_id") or "-")
     return EXIT_OK
 
 
@@ -655,6 +659,113 @@ def cmd_verify(args, console: Console) -> int:
         console.kv("signer", sig.get("signer") or "(unnamed)")
         console.kv("public key", sig.get("public_key", ""))
         console.kv("signed", sig.get("signed_utc", "?"))
+    return EXIT_OK
+
+
+def cmd_collection(args, console: Console) -> int:
+    try:
+        coll = collections.load_collection(args.path, strict=not args.lax)
+    except collections.CollectionError as exc:
+        return _die(console, str(exc), EXIT_MISMATCH)
+
+    if args.action == "list":
+        if console.json_mode:
+            console.emit_json({"ok": True, "collection": coll.to_dict(),
+                               "manifest": coll.path})
+            return EXIT_OK
+        console.head(BANNER)
+        console.kv("collection", coll.name)
+        if coll.description:
+            console.kv("description", coll.description)
+        console.kv("manifest", coll.path)
+        console.kv("patches", len(coll.entries))
+        for e in coll.entries:
+            console.say("  [%3d] %-44s %s" % (e.order, e.bundle.id,
+                                              e.bundle_file))
+            if e.description:
+                console.say("        · %s" % e.description)
+            if not e.enabled:
+                console.say("        · disabled")
+            if e.bundle.signature:
+                trusted = keys.is_trusted(
+                    policy.config_dir(), e.bundle.signature.get("public_key", ""))
+                console.say("        · signed by %s%s"
+                            % (e.bundle.signer(), "" if trusted
+                               else "  (NOT trusted)"))
+        console.say("")
+        console.say("  next: surreal collection check %s --target app.exe"
+                    % os.path.basename(os.path.dirname(coll.path) or "."))
+        return EXIT_OK
+
+    # check / apply need a target
+    target = args.target
+    if args.action == "check":
+        try:
+            report = collections.preflight(
+                coll, target, require_signature=args.require_signature,
+                extra_trusted=args.trusted_key,
+                allow_abs_address=args.allow_abs_address)
+        except (collections.CollectionError, patcher.PatchError) as exc:
+            code = getattr(exc, "code", EXIT_MISMATCH)
+            return _die(console, str(exc), code)
+        if console.json_mode:
+            console.emit_json({"ok": True, "collection": coll.name, "report": report})
+            return EXIT_OK
+        console.head(BANNER)
+        console.ok("%d patch(es) from %r apply cleanly to %s"
+                   % (len(report["applicable"]), coll.name,
+                      os.path.basename(target)))
+        for item in report["applicable"]:
+            console.say("    · %-40s %2d hunk(s)  signature: %s"
+                        % (item["bundle"], item["hunks"], item["signature"]))
+        for item in report["skipped"]:
+            console.warn("skipped %s (%s)" % (item["bundle"], item["reason"]))
+        for warn in report["warnings"]:
+            console.warn(warn)
+        console.kv("result sha256", report["result_sha256"])
+        console.say("\n  run: surreal collection apply %s --target %s"
+                    % (os.path.basename(os.path.dirname(coll.path) or "."),
+                       os.path.basename(target)))
+        return EXIT_OK
+
+    # apply
+    try:
+        policy.require_acceptance()
+    except PermissionError as exc:
+        return _die(console, str(exc), EXIT_POLICY)
+    if not args.yes and not console.json_mode:
+        if not _confirm(console, "apply %r to %s?"
+                        % (coll.name, os.path.abspath(target)), args.yes):
+            console.err("aborted (no changes written)")
+            return EXIT_MISMATCH
+    try:
+        result = collections.apply_collection(
+            coll, target, require_signature=args.require_signature,
+            extra_trusted=args.trusted_key,
+            allow_abs_address=args.allow_abs_address,
+            keep_backups=args.keep_backups)
+    except (collections.CollectionError, patcher.PatchError) as exc:
+        return _die(console, str(exc), getattr(exc, "code", EXIT_IO))
+    except OSError as exc:
+        return _die(console, "IO error: %s" % exc, EXIT_IO)
+
+    if console.json_mode:
+        console.emit_json({"ok": True, **result})
+        return EXIT_OK
+    console.head(BANNER)
+    console.ok("applied %d patch(es) from %r to %s"
+               % (len(result["applied"]), coll.name,
+                  os.path.basename(result["target"])))
+    for item in result["applied"]:
+        console.say("    · %-40s %2d hunk(s)  %s…" % (item["bundle"], item["hunks"],
+                                                     item["sha256_after"][:8]))
+    for item in result["skipped"]:
+        console.warn("skipped %s (%s)" % (item["bundle"], item["reason"]))
+    console.kv("sha256 before", result["sha256_before"])
+    console.kv("sha256 after", result["sha256_after"])
+    if result.get("backup"):
+        console.kv("backup", result["backup"])
+    console.say("\n  undo with: surreal revert %s" % os.path.basename(target))
     return EXIT_OK
 
 
@@ -864,6 +975,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--trusted-key", action="append", metavar="HEX", default=[])
     sp.add_argument("--lax", action="store_true")
     sp.set_defaults(func=cmd_verify)
+
+    sp = add("collection", "list/check/apply a set of bundles as one transaction")
+    sp.add_argument("action", choices=["list", "check", "apply"])
+    sp.add_argument("path", help="collection directory or manifest file")
+    sp.add_argument("--target", help="binary to patch (check/apply)")
+    sp.add_argument("--yes", "-y", action="store_true")
+    sp.add_argument("--require-signature", action="store_true")
+    sp.add_argument("--trusted-key", action="append", metavar="HEX", default=[])
+    sp.add_argument("--allow-abs-address", action="store_true")
+    sp.add_argument("--keep-backups", type=int, default=3)
+    sp.add_argument("--lax", action="store_true")
+    sp.set_defaults(func=cmd_collection)
 
     sp = add("demo", "write a synthetic demo app + patch bundle to a directory")
     sp.add_argument("--out", default="surreal-demo", help="output directory")

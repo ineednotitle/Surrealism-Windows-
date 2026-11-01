@@ -100,6 +100,7 @@ $ python -m surreal check surreal-demo/demo-shorten-nag.morph `
 | `check <morph> --target <exe>` | full preflight, writes nothing, exit code tells you if it would work |
 | `apply <morph> --target <exe>` | lock → backup → verify → patch a copy → recompute checksum → atomic swap → journal |
 | `revert <exe>` | restore the last backup (`--list` shows the journal) |
+| `collection list/check/apply` | apply a set of bundles as one transaction (all-or-nothing, one backup) |
 | `sign <morph> --key me.key` | sign a bundle (ed25519); makes it tamper-evident |
 | `verify <morph> [--require]` | check the signature and whether the key is trusted |
 | `keys --generate/--trust/--untrust` | manage your signing key and trusted-key store |
@@ -197,6 +198,21 @@ changed since it was patched.
   (`--force` non-PE diffs, fallbacks) *before* allocating, so surreal fails with
   a clear message instead of swapping a 4 GB machine to death.
 
+### Collections (v0.4): "apply all my patches" as one transaction
+
+```bash
+surreal collection list  patches/
+surreal collection check patches/ --target app.exe     # dry run on a temp copy
+surreal collection apply patches/ --target app.exe -y   # one backup, all-or-nothing
+surreal revert app.exe                                  # undo the whole set
+```
+
+Collection members must be **size-preserving** (so later RVAs stay valid), the
+first patch must match the pristine build exactly, and every later patch still
+gets full per-hunk byte verification. Any failure restores the single backup and
+journals a rollback. Manifest format and semantics:
+[`docs/COLLECTIONS.md`](docs/COLLECTIONS.md).
+
 ### Size-changing patches (v0.3, overlay only)
 
 `surreal diff` now also handles two builds whose **overlay** differs in size —
@@ -254,19 +270,22 @@ Full policy, including the takedown process: [`docs/LEGAL.md`](docs/LEGAL.md).
 
 ```
 PLAN.md                  design + roadmap (read this first)
-surreal/                 the tool: pe.py, scanner.py, diffgen.py, patcher.py, …
+surreal/                 the tool: pe.py, scanner.py, diffgen.py, patcher.py,
+                         keys.py (ed25519), lock.py, reloc.py, memguard.py,
+                         collection.py, testkit.py
 surreal/testkit.py       synthetic PE builder + `surreal selftest`
-tests/                   101 unit tests, incl. perf/RAM budget tests
+tests/                   204 unit tests, incl. perf/RAM budget tests
 tools/bench.py           low-end benchmark harness
-examples/                a ready-made bundle + walkthrough
+examples/                three ready-made bundles + a collection + walkthrough
 build/                   PyInstaller spec + Windows/macOS/Linux build scripts
-docs/                    ARCHITECTURE · PATCH_FORMAT · LEGAL · COMPATIBILITY
+docs/                    ARCHITECTURE · PATCH_FORMAT · SIGNING · COLLECTIONS
+                         LEGAL · COMPATIBILITY
 ```
 
 ## Development
 
 ```bash
-python run_tests.py            # full suite (no dependencies)
+python run_tests.py            # 204 tests, no dependencies
 python tools/bench.py          # performance budget
 python -m surreal selftest     # end-to-end smoke test
 ```
