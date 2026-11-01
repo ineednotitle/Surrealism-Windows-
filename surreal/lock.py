@@ -15,7 +15,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
-import socket
+import platform
 import time
 from typing import Any, Dict, Optional
 
@@ -61,7 +61,8 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _hostname() -> str:
-    return os.environ.get("COMPUTERNAME") or socket.gethostname()
+    name = os.environ.get("COMPUTERNAME") or platform.node()
+    return name or "unknown-host"
 
 
 class TargetLock:
