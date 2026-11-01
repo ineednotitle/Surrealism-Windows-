@@ -100,7 +100,8 @@ $ python -m surreal check surreal-demo/demo-shorten-nag.morph `
 | `check <morph> --target <exe>` | full preflight, writes nothing, exit code tells you if it would work |
 | `apply <morph> --target <exe>` | lock → backup → verify → patch a copy → recompute checksum → atomic swap → journal |
 | `revert <exe>` | restore the last backup (`--list` shows the journal) |
-| `collection list/check/apply` | apply a set of bundles as one transaction (all-or-nothing, one backup) |
+| `collection list/check/apply` | apply a set of bundles as one transaction (all-or-nothing, one backup); `target` per entry → multi-file vault |
+| `repo index/list/show/apply` | index a folder of bundles (with hashes), list matches for a build, apply one by id |
 | `sign <morph> --key me.key` | sign a bundle (ed25519); makes it tamper-evident |
 | `verify <morph> [--require]` | check the signature and whether the key is trusted |
 | `keys --generate/--trust/--untrust` | manage your signing key and trusted-key store |
@@ -255,6 +256,23 @@ surreal apply remove-config.morph --target old.exe  # op=truncate, file shrinks 
 Size-changing bundles also refuse `--accept-drift`, because an append is only
 meaningful on the exact build it was authored for.
 
+### Local patch repos (v0.5): a curated set, one command
+
+No network code exists in surreal (CI enforces it), so a repo is a JSON index of
+bundles you already have on disk:
+
+```bash
+surreal repo index patches/ -o patches/surreal-repo.json
+surreal repo list  patches/surreal-repo.json --target app.exe   # * = matches this build
+surreal repo show  patches/surreal-repo.json --id org.you.dark-theme
+surreal repo apply patches/surreal-repo.json --id org.you.dark-theme --target app.exe
+```
+
+The index stores each bundle's sha256, so a file edited after indexing is refused
+instead of applied. Paths are relative and confined to the index (no absolute
+paths, no `..`), and the index records who signed what — trust still comes from
+your key store. Full details: [`docs/REPO.md`](docs/REPO.md).
+
 ### Header surgery (v0.5): growing the image on purpose
 
 The overlay is not mapped, so growing it needs no header edits. Growing *inside*
@@ -365,7 +383,8 @@ contributor is allowed to modify.
 | **M3-lite (shipped, v0.4)** | `surreal collection`: N size-preserving bundles applied as one transaction with a single backup |
 | **M3 vault (shipped, v0.5)** | `target` per patch entry → N binaries patched as one transaction, per-file backups and journals |
 | **M3 deps (shipped, v0.5)** | `depends_on` topological ordering, `conflicts_with` refusal, unique ids |
-| M3 | patch scripting (sandboxed, no shell), local repo client |
+| **M4 repo (shipped, v0.5)** | `surreal repo index/list/show/apply`: local index with per-bundle integrity hashes and target matching |
+| M3 | patch scripting (sandboxed, no shell) |
 | M4 | `--tui` and `apply --repo` for curated bundle collections |
 
 MIT licensed. Not affiliated with Morphe, ReVanced or any vendor whose software

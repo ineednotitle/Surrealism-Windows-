@@ -106,6 +106,13 @@ jobs:
           python -m surreal collection apply vault-out/vault --target vault-out/app -y
           python -m surreal revert vault-out/app/main.exe
           python -m surreal revert vault-out/app/helper.dll
+      - name: Local repo smoke (M4)
+        run: |
+          python -m surreal repo index examples -o examples/surreal-repo.json --created 2026-11-01T00:00:00Z
+          python -m surreal repo list examples/surreal-repo.json --target demo-out/demo_app.exe
+          python -m surreal repo show examples/surreal-repo.json --id org.surreal.demo.shorten-nag
+          python -m surreal repo apply examples/surreal-repo.json --id org.surreal.demo.shorten-nag --target demo-out/demo_app.exe -y
+          python -m surreal revert demo-out/demo_app.exe
       - name: Performance budget
         run: python tools/bench.py --mb 32
 

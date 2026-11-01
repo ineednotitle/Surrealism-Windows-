@@ -551,6 +551,40 @@ def run_selftest(keep: bool = False, workdir: Optional[str] = None,
 
         step("vault apply + per-file revert (multi-file)", _vault)
 
+        def _repo():
+            from . import repo as _repo
+
+            repodir = os.path.join(base, "repodir")
+            os.makedirs(repodir, exist_ok=True)
+            shutil.copyfile(bundle_path, os.path.join(repodir, "nag.morph"))
+            index = _repo.build_index(repodir, name="selftest repo",
+                                      base_dir=repodir)
+            idx_path = os.path.join(repodir, "surreal-repo.json")
+            _repo.write_index(index, idx_path)
+            loaded = _repo.load_index(idx_path)
+            matches = _repo.matching(loaded, old)
+            if not matches:
+                raise AssertionError("repo index did not match the fixture")
+            entry = matches[0]
+            rb, path = _repo.load_bundle(loaded, entry)
+            if not os.path.isfile(path):
+                raise AssertionError("repo resolved a missing bundle")
+            before = sha256_file(old)
+            patcher.apply_bundle(rb, old)
+            patcher.revert(old)
+            if sha256_file(old) != before:
+                raise AssertionError("repo apply/revert did not restore the file")
+            # a bundle edited after indexing must be refused
+            with open(os.path.join(repodir, "nag.morph"), "ab") as fh:
+                fh.write(b" ")
+            try:
+                _repo.load_bundle(loaded, entry)
+            except _repo.RepoError:
+                return "%d bundle(s) indexed, integrity enforced" % len(loaded["bundles"])
+            raise AssertionError("stale repo index was accepted")
+
+        step("local patch repo (index + apply)", _repo)
+
         def _bad_bundle():
             bad = os.path.join(base, "bad.morph")
             with open(bad, "w", encoding="utf-8") as fh:

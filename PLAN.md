@@ -404,7 +404,18 @@ self-dependency errors, disabled dependency blocks the dependent) and
 `conflicts_with` (refused when both are applicable), so ordering constraints stay
 declarative data rather than scripts.
 
-Next: optional sandboxed patch scripting, TUI, a local-only repo client.
+### M4-lite (shipped in v0.5) — local patch repo
+
+`surreal repo index` walks a folder, loads every `.morph` and writes a JSON index
+with each bundle's sha256, target identity, ops and signer. `repo list --target`
+marks the bundles that match a given build; `repo show` prints one in full;
+`repo apply` resolves, hash-checks and then runs the normal apply path. Deliberate
+limits: the index only ever contains relative paths (validated at load), it is an
+integrity record rather than a trust anchor (signatures + the trusted-key store
+remain the authority), and nothing is fetched — the tool has no network code and
+CI fails if one is added.
+
+Next: optional sandboxed patch scripting, `--tui`.
 
 ## 7. Milestones
 
@@ -414,7 +425,7 @@ Next: optional sandboxed patch scripting, TUI, a local-only repo client.
 | M1 | ed25519 `.morph` signatures (pure-Python, no dependency), trusted-key store, apply lock, ASLR/relocation checks, `--max-mem` | bundles are tamper-evident and safe on relocatable images — **done (v0.2)** |
 | M2 | size-changing patches (append overlay — **done v0.3**; extend/add section — **done v0.5**), manifest/vault for multi-file apps | patch a 3-file app atomically |
 | M3 | multi-file vaults and patch dependencies/conflicts (**done v0.5**), optional patch scripting (sandboxed, no shell) | community patch repo works |
-| M4 | TUI (`--tui`) + patch repository client (`apply --repo repo.json`) | one-command "apply all trusted bundles" |
+| M4 | TUI (`--tui`) + patch repository client (**repo index/list/show/apply done v0.5**) | one-command "apply all trusted bundles" |
 
 ## 8. Risks & mitigations
 

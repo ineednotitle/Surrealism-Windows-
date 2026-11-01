@@ -15,6 +15,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from surreal import repo  # noqa: E402
 from surreal import surgery  # noqa: E402
 from surreal.diffgen import build_bundle  # noqa: E402
 from surreal.pe import PE  # noqa: E402
@@ -157,6 +158,16 @@ def main() -> int:
             _json.dump(manifest, fh, indent=2)
             fh.write("\n")
         print("wrote %s (%d patches)" % (path, len(manifest["patches"])))
+
+        # a local patch repo index over the examples themselves
+        index = repo.build_index(EXAMPLES, name="Surrealism Window examples",
+                                 description=("Reproducibly generated demo bundles. "
+                                              "Index only — no trust implied."),
+                                 base_dir=EXAMPLES,
+                                 created_utc="2026-11-01T00:00:00Z")
+        repo_path = os.path.join(EXAMPLES, "surreal-repo.json")
+        repo.write_index(index, repo_path)
+        print("wrote %s (%d bundles)" % (repo_path, len(index["bundles"])))
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

@@ -1,0 +1,101 @@
+{
+  "format": "surreal.repo",
+  "format_version": 1,
+  "name": "Surrealism Window examples",
+  "description": "Reproducibly generated demo bundles. Index only \u2014 no trust implied.",
+  "bundles": [
+    {
+      "id": "org.surreal.demo.append-overlay",
+      "name": "Demo: append an overlay config blob",
+      "file": "demo-append-overlay.morph",
+      "bundle_sha256": "14d79c49c795841277df60e9386915a935b390aeb8bf8761af2f95c78b7524c4",
+      "version": "1.0.0",
+      "author": "surreal demo",
+      "description": "Appends 88 bytes after the last section. Overlay growth is the only size change that needs no header, section table or RVA fixups.",
+      "license": "",
+      "homepage": "",
+      "hunks": 1,
+      "ops": [
+        "append"
+      ],
+      "target": {
+        "filename": "demo_app.exe",
+        "size": 2048,
+        "sha256": "4d51cec411ac4bf2856d007044be52d8da0713e4abe227f02244193c66251408"
+      },
+      "signer": "",
+      "public_key": null,
+      "policy_blocked": null
+    },
+    {
+      "id": "org.surreal.demo.blank-version",
+      "name": "Demo: blank the version string",
+      "file": "demo-blank-version.morph",
+      "bundle_sha256": "050038bbcebc4e7050d925d1e1d84715d8e74144b35cbd59377302e1e6aaeec1",
+      "version": "1.0.0",
+      "author": "surreal demo",
+      "description": "Hides the build string in .rdata. Size-preserving, so it can be combined with other patches in a collection.",
+      "license": "",
+      "homepage": "",
+      "hunks": 1,
+      "ops": [
+        "patch"
+      ],
+      "target": {
+        "filename": "demo_app.exe",
+        "size": 2048,
+        "sha256": "4d51cec411ac4bf2856d007044be52d8da0713e4abe227f02244193c66251408"
+      },
+      "signer": "",
+      "public_key": null,
+      "policy_blocked": null
+    },
+    {
+      "id": "org.surreal.demo.extend-section",
+      "name": "Demo: grow the last section",
+      "file": "demo-extend-section.morph",
+      "bundle_sha256": "27f262bc8021374c7a651ed755ba9e18963ee4140efaf3d91f137d54641b2043",
+      "version": "1.0.0",
+      "author": "surreal demo",
+      "description": "Appends 60 bytes to the last section and rewrites VirtualSize, SizeOfRawData and SizeOfImage. This is the header-surgery path: still declarative, still verified by a replay during generation.",
+      "license": "",
+      "homepage": "",
+      "hunks": 1,
+      "ops": [
+        "extend-section"
+      ],
+      "target": {
+        "filename": "demo_app.exe",
+        "size": 2048,
+        "sha256": "4d51cec411ac4bf2856d007044be52d8da0713e4abe227f02244193c66251408"
+      },
+      "signer": "",
+      "public_key": null,
+      "policy_blocked": null
+    },
+    {
+      "id": "org.surreal.demo.shorten-nag",
+      "name": "Demo: blank the trial nag + flip one branch",
+      "file": "demo-shorten-nag.morph",
+      "bundle_sha256": "5eb0ceb126495d06712e8bbc3f331d1da1fe669d2cae8b097b1651381bce553d",
+      "version": "1.0.0",
+      "author": "surreal demo",
+      "description": "Generated from surreal.testkit fixtures. Two edits: a conditional jump is inverted and the nag string is blanked in place. Same-length, size-preserving.",
+      "license": "",
+      "homepage": "",
+      "hunks": 2,
+      "ops": [
+        "patch"
+      ],
+      "target": {
+        "filename": "demo_app.exe",
+        "size": 2048,
+        "sha256": "4d51cec411ac4bf2856d007044be52d8da0713e4abe227f02244193c66251408"
+      },
+      "signer": "",
+      "public_key": null,
+      "policy_blocked": null
+    }
+  ],
+  "created_utc": "2026-11-01T00:00:00Z"
+}

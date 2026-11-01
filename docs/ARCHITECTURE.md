@@ -12,6 +12,7 @@
 | `surreal/patcher.py` | plan → verify → backup → patch copy → checksum → atomic swap | skip verification |
 | `surreal/surgery.py` | plan + post-write proof for the two header-surgery ops (`extend-section`, `add-section`) | execute anything, touch overlays |
 | `surreal/collection.py` | collections + multi-file vaults: selection, ordering, preflight on temp copies, transactional apply with rollback | patch anything outside the manifest's own directory tree |
+| `surreal/repo.py` | local patch repo index: build/load/validate, per-file integrity hashes, target matching | fetch anything, trust anyone |
 | `surreal/journal.py` | `<dir>/.surreal/journal.json` + `backups/` (one journal per directory, filtered per target file) | lose a backup silently |
 | `surreal/policy.py` | acceptable-use acknowledgement gate | nag twice |
 | `surreal/testkit.py` | synthetic PE builder, `selftest`, demo fixtures | ship real binaries |

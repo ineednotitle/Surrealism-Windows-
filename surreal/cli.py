@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from . import FORMAT_NAME, TOOL_NAME, __version__
 from . import collection as collections
+from . import repo as repos
 from . import diffgen, keys, memguard, patcher, policy, scanner
 from .patchfile import Bundle, BundleError
 from .pe import PE, PEError
@@ -874,6 +875,168 @@ def cmd_collection(args, console: Console) -> int:
     return EXIT_OK
 
 
+def cmd_repo(args, console: Console) -> int:
+    cfg = policy.config_dir()
+    if args.action == "index":
+        try:
+            index = repos.build_index(
+                args.path, name=args.name or "", description=args.description or "",
+                config_dir=cfg, created_utc=args.created or None,
+                base_dir=os.path.dirname(os.path.abspath(args.output or
+                        os.path.join(args.path, "surreal-repo.json"))),
+                strict=not args.lax)
+        except (repos.RepoError, OSError) as exc:
+            return _die(console, str(exc), EXIT_MISMATCH)
+        out = args.output or os.path.join(args.path, "surreal-repo.json")
+        try:
+            repos.write_index(index, out)
+        except OSError as exc:
+            return _die(console, "IO error: %s" % exc, EXIT_IO)
+        if console.json_mode:
+            console.emit_json({"ok": True, "index": out,
+                               "summary": repos.summarize(index, cfg)})
+            return EXIT_OK
+        console.head(BANNER)
+        console.ok("indexed %d bundle(s) → %s" % (len(index["bundles"]), out))
+        for entry in index["bundles"]:
+            console.say("    · %-40s %-28s %s"
+                        % (entry["id"], entry["file"],
+                           repos.trust_state(index, entry, cfg)))
+        for skipped in index.get("skipped") or []:
+            console.warn("skipped %s" % skipped)
+        console.kv("next", "surreal repo list %s --target app.exe" % out)
+        return EXIT_OK
+
+    try:
+        index = repos.load_index(args.path, strict=not args.lax)
+    except (repos.RepoError, OSError) as exc:
+        return _die(console, str(exc), EXIT_MISMATCH)
+
+    if args.action == "list":
+        matches = []
+        if args.target:
+            try:
+                matches = repos.matching(index, args.target)
+            except OSError as exc:
+                return _die(console, "IO error: %s" % exc, EXIT_IO)
+            matches = [e["id"] for e in matches]
+        if console.json_mode:
+            console.emit_json({"ok": True, "repo": repos.summarize(index, cfg),
+                               "bundles": index["bundles"],
+                               "matches": matches})
+            return EXIT_OK
+        console.head(BANNER)
+        console.kv("repo", index.get("name"))
+        console.kv("index", index.get("_index_path"))
+        for key, value in repos.summarize(index, cfg).items():
+            if key not in ("name", "path"):
+                console.kv(key, value)
+        console.say("")
+        for entry in index["bundles"]:
+            mark = "*" if entry["id"] in matches else " "
+            console.say("  %s %-40s %-26s %s"
+                        % (mark, entry["id"], entry["file"],
+                           repos.trust_state(index, entry, cfg)))
+            target = entry.get("target") or {}
+            detail = "%s · %d hunk(s) · %s" % (
+                target.get("filename") or "?",
+                entry.get("hunks", 0),
+                ", ".join(entry.get("ops") or ["patch"]))
+            console.say("        · %s" % detail)
+        if args.target:
+            console.say("")
+            if matches:
+                console.ok("%d bundle(s) match %s (marked *)"
+                           % (len(matches), os.path.basename(args.target)))
+            else:
+                console.warn("no bundle in this repo targets %s"
+                             % os.path.basename(args.target))
+        return EXIT_OK
+
+    # show / apply need a bundle id
+    if not args.bundle_id:
+        return _die(console, "repo %s requires --id" % args.action, EXIT_USAGE)
+    try:
+        entry = repos.get(index, args.bundle_id)
+        bundle, path = repos.load_bundle(index, entry, strict=not args.lax)
+    except repos.RepoError as exc:
+        return _die(console, str(exc), EXIT_MISMATCH)
+
+    if args.action == "show":
+        if console.json_mode:
+            console.emit_json({"ok": True, "entry": entry,
+                               "bundle": bundle.to_dict(), "path": path,
+                               "trust": repos.trust_state(index, entry, cfg)})
+            return EXIT_OK
+        console.head(BANNER)
+        console.kv("bundle", bundle.id)
+        console.kv("name", bundle.name)
+        console.kv("file", path)
+        console.kv("sha256", entry["bundle_sha256"])
+        console.kv("signature", repos.trust_state(index, entry, cfg))
+        if entry.get("signer"):
+            console.kv("signer", entry["signer"])
+        target = entry.get("target") or {}
+        console.kv("authored for", "%s · %s bytes · sha256 %s"
+                   % (target.get("filename") or "?",
+                      target.get("size"), (target.get("sha256") or "?")[:16]))
+        console.kv("hunks", "%d (%s)" % (len(bundle.hunks),
+                                        ", ".join(entry.get("ops") or ["patch"])))
+        console.say("")
+        console.say("  run: surreal repo apply %s --id %s --target app.exe"
+                    % (os.path.basename(index["_index_path"]), bundle.id))
+        return EXIT_OK
+
+    # apply
+    if entry.get("policy_blocked"):
+        return _die(console, "bundle is policy-blocked: %s"
+                    % entry["policy_blocked"], EXIT_POLICY)
+    if not args.target:
+        return _die(console, "repo apply requires --target", EXIT_USAGE)
+    try:
+        policy.require_acceptance()
+    except PermissionError as exc:
+        return _die(console, str(exc), EXIT_POLICY)
+    if not args.dry_run and not args.yes and not console.json_mode:
+        if not _confirm(console, "apply %r from %s to %s?"
+                        % (bundle.id, os.path.basename(index["_index_path"]),
+                           os.path.abspath(args.target)), args.yes):
+            console.err("aborted (no changes written)")
+            return EXIT_MISMATCH
+    try:
+        result = patcher.apply_bundle(
+            bundle, args.target, dry_run=args.dry_run,
+            accept_drift=args.accept_drift, no_checksum=args.no_checksum,
+            require_signature=args.require_signature,
+            extra_trusted=args.trusted_key,
+            allow_abs_address=args.allow_abs_address,
+            force_unlock=args.force_unlock, keep_backups=args.keep_backups)
+    except patcher.PatchError as exc:
+        return _die(console, str(exc), exc.code)
+    except OSError as exc:
+        return _die(console, "IO error: %s" % exc, EXIT_IO)
+    if console.json_mode:
+        console.emit_json({"ok": True, **result})
+        return EXIT_OK
+    console.head(BANNER)
+    for note in result.get("notes") or []:
+        console.say("    · %s" % note)
+    for warn in result.get("warnings") or []:
+        console.warn(warn)
+    if args.dry_run:
+        console.ok("dry run: %s would apply to %s"
+                   % (bundle.id, os.path.basename(args.target)))
+        return EXIT_OK
+    console.ok("patched %s from repo %r (%d hunk(s))"
+               % (os.path.basename(args.target), index.get("name"),
+                  result["hunks"]))
+    console.kv("sha256 after", result["sha256_after"])
+    if result.get("backup"):
+        console.kv("backup", result["backup"])
+    console.say("\n  undo with: surreal revert %s" % os.path.basename(args.target))
+    return EXIT_OK
+
+
 def cmd_demo(args, console: Console) -> int:
     """Write a synthetic 'app' + a patch bundle to a directory, to try the flow."""
     from .testkit import make_pe_pair
@@ -1092,6 +1255,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--keep-backups", type=int, default=3)
     sp.add_argument("--lax", action="store_true")
     sp.set_defaults(func=cmd_collection)
+
+    sp = add("repo", "index a folder of bundles / list / show / apply from it")
+    sp.add_argument("action", choices=["index", "list", "show", "apply"])
+    sp.add_argument("path", help="folder to index, or an existing repo index file")
+    sp.add_argument("-o", "--output", default="", help="index to write (repo index)")
+    sp.add_argument("--name", default="", help="repo name (index)")
+    sp.add_argument("--description", default="", help="repo description (index)")
+    sp.add_argument("--created", default="", help="created_utc stamp (index)")
+    sp.add_argument("--id", dest="bundle_id", default="", help="bundle id (show/apply)")
+    sp.add_argument("--target", default="", help="file to match (list) or patch (apply)")
+    sp.add_argument("--dry-run", action="store_true", help="resolve+verify only")
+    sp.add_argument("--yes", "-y", action="store_true")
+    sp.add_argument("--accept-drift", action="store_true")
+    sp.add_argument("--no-checksum", action="store_true")
+    sp.add_argument("--require-signature", action="store_true")
+    sp.add_argument("--trusted-key", action="append", metavar="HEX", default=[])
+    sp.add_argument("--allow-abs-address", action="store_true")
+    sp.add_argument("--force-unlock", action="store_true")
+    sp.add_argument("--keep-backups", type=int, default=3)
+    sp.add_argument("--lax", action="store_true")
+    sp.set_defaults(func=cmd_repo)
 
     sp = add("demo", "write a synthetic demo app + patch bundle to a directory")
     sp.add_argument("--out", default="surreal-demo", help="output directory")
