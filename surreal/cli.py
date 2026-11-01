@@ -711,6 +711,11 @@ def cmd_collection(args, console: Console) -> int:
                            "  →  %s" % e.target if e.target else ""))
             if e.description:
                 console.say("        · %s" % e.description)
+            if e.depends_on:
+                console.say("        · requires %s" % ", ".join(e.depends_on))
+            if e.conflicts_with:
+                console.say("        · conflicts with %s"
+                            % ", ".join(e.conflicts_with))
             if not e.enabled:
                 console.say("        · disabled")
             if e.bundle.signature:

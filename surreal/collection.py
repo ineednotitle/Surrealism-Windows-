@@ -59,11 +59,31 @@ FORMAT_VERSION = 1
 ALLOWED_KEYS = {"format", "format_version", "name", "description", "author",
                 "homepage", "license", "patches", "created_utc"}
 ALLOWED_PATCH_KEYS = {"bundle", "order", "required", "description", "enabled",
-                      "target"}
+                      "target", "depends_on", "conflicts_with"}
 
 
 class CollectionError(Exception):
     pass
+
+
+def _id_list(item: Dict[str, Any], key: str, index: int) -> List[str]:
+    """Read a list-of-bundle-ids field (``depends_on`` / ``conflicts_with``)."""
+    raw = item.get(key)
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        raise CollectionError("patch %d: '%s' must be a list of bundle ids"
+                              % (index, key))
+    out: List[str] = []
+    for value in raw:
+        if not isinstance(value, str) or not value.strip():
+            raise CollectionError("patch %d: '%s' entries must be non-empty "
+                                  "strings" % (index, key))
+        if value not in out:
+            out.append(value.strip())
+    return out
 
 
 def safe_relative(path: str, what: str = "path") -> str:
@@ -90,6 +110,8 @@ class Entry:
     bundle: Optional[Bundle] = None
     path: Optional[str] = None
     target: Optional[str] = None      # vault: path relative to the app root
+    depends_on: List[str] = field(default_factory=list)
+    conflicts_with: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -144,6 +166,9 @@ class Collection:
                 {"bundle": e.bundle_file, "order": e.order,
                  "required": e.required, "description": e.description,
                  **({"target": e.target} if e.target else {}),
+                 **({"depends_on": list(e.depends_on)} if e.depends_on else {}),
+                 **({"conflicts_with": list(e.conflicts_with)}
+                    if e.conflicts_with else {}),
                  **({} if e.enabled else {"enabled": False})}
                 for e in self.entries
             ],
@@ -203,6 +228,8 @@ def load_collection(path: str, strict: bool = True) -> Collection:
             raise CollectionError(
                 "patch %d: bundle path %r must be relative to the collection "
                 "directory (absolute paths and '..' are refused)" % (i, bundle_file))
+        depends_on = _id_list(item, "depends_on", i)
+        conflicts_with = _id_list(item, "conflicts_with", i)
         target_rel = item.get("target")
         if target_rel is not None:
             if not isinstance(target_rel, str):
@@ -222,9 +249,12 @@ def load_collection(path: str, strict: bool = True) -> Collection:
             bundle=bundle,
             path=bundle_path,
             target=target_rel,
+            depends_on=depends_on,
+            conflicts_with=conflicts_with,
         ))
     if not entries:
         raise CollectionError("collection contains no patches")
+    entries = _order_by_dependencies(_primary_order(entries))
     with_target = [e for e in entries if e.target]
     if with_target and len(with_target) != len(entries):
         missing = [e.bundle_file for e in entries if not e.target]
@@ -233,7 +263,6 @@ def load_collection(path: str, strict: bool = True) -> Collection:
             "Either every patch names one (a vault over an application directory) "
             "or none do (a single-target collection)"
             % (len(with_target), ", ".join(missing[:3])))
-    entries.sort(key=lambda e: (e.order, e.bundle.id if e.bundle else e.bundle_file))
     return Collection(
         name=str(raw.get("name") or os.path.splitext(os.path.basename(manifest))[0]),
         entries=entries,
@@ -244,6 +273,74 @@ def load_collection(path: str, strict: bool = True) -> Collection:
         base_dir=base,
         path=manifest,
     )
+
+
+# --------------------------------------------------------------------------- #
+# dependencies
+# --------------------------------------------------------------------------- #
+def _primary_order(entries: List[Entry]) -> List[Entry]:
+    """Deterministic baseline: ``order`` first, bundle id (or filename) on ties."""
+    return sorted(entries, key=lambda e: (e.order,
+                                          e.bundle.id if e.bundle else e.bundle_file))
+
+
+def _order_by_dependencies(entries: List[Entry]) -> List[Entry]:
+    """Stable topological sort: a patch always follows what it depends on.
+
+    ``order``/bundle-id ordering still decides the sequence *between* unrelated
+    patches, so the result stays deterministic.
+    """
+    ids = {}
+    for entry in entries:
+        if entry.bundle is not None:
+            if entry.bundle.id in ids:
+                raise CollectionError("duplicate bundle id %r in collection "
+                                      "(ids must be unique)" % entry.bundle.id)
+            ids[entry.bundle.id] = entry
+    for entry in entries:
+        for dep in entry.depends_on:
+            if entry.bundle is not None and dep == entry.bundle.id:
+                raise CollectionError("patch %s depends on itself" % dep)
+            if dep not in ids:
+                raise CollectionError(
+                    "patch %s depends on %r, which is not in this collection"
+                    % (entry.bundle.id if entry.bundle else entry.bundle_file, dep))
+
+    ordered: List[Entry] = []
+    placed = set()
+    pending = list(entries)
+    while pending:
+        ready = [e for e in pending
+                 if all(dep in placed for dep in e.depends_on)]
+        if not ready:
+            cycle = ", ".join(sorted(e.bundle.id for e in pending
+                                     if e.bundle is not None))
+            raise CollectionError(
+                "dependency cycle between patches: %s — break the cycle (a "
+                "collection is a sequence, not a graph)" % cycle)
+        # keep the existing (order, id) sequence among ready entries
+        chosen = ready[0]
+        ordered.append(chosen)
+        placed.add(chosen.bundle.id if chosen.bundle else chosen.bundle_file)
+        pending.remove(chosen)
+    return ordered
+
+
+def check_conflicts(selected: List[Entry]) -> None:
+    """Refuse a set where one patch declares a conflict with another member."""
+    ids = {}
+    for entry in selected:
+        if entry.bundle is not None:
+            ids[entry.bundle.id] = entry
+    for entry in selected:
+        if entry.bundle is None:
+            continue
+        for other in entry.conflicts_with:
+            if other in ids:
+                raise CollectionError(
+                    "patch %s conflicts with %s — remove one of them from the "
+                    "collection (or disable it with \"enabled\": false)"
+                    % (entry.bundle.id, other))
 
 
 # --------------------------------------------------------------------------- #
@@ -273,7 +370,30 @@ def select(collection: Collection, target_path: str) -> Tuple[List[Entry], List[
             ok.append(entry)
         else:
             skipped.append(entry)
+    check_conflicts(ok)
+    _check_dependencies(collection, ok, skipped)
     return ok, skipped
+
+
+def _check_dependencies(collection: Collection, ok: List[Entry],
+                        skipped: List[Entry]) -> None:
+    """A selected patch must not depend on a patch that will not be applied."""
+    applied = {e.bundle.id for e in ok if e.bundle is not None}
+    known = {e.bundle.id for e in collection.entries if e.bundle is not None}
+    for entry in ok:
+        if entry.bundle is None:
+            continue
+        for dep in entry.depends_on:
+            if dep in applied:
+                continue
+            reason = ("disabled" if any(e.bundle is not None and e.bundle.id == dep
+                                        and not e.enabled
+                                        for e in collection.entries)
+                      else "not applicable to this target")
+            raise CollectionError(
+                "patch %s depends on %s, which is %s — enable it or drop the "
+                "patch" % (entry.bundle.id, dep,
+                           reason if dep in known else "missing"))
 
 
 # --------------------------------------------------------------------------- #

@@ -234,6 +234,11 @@ file touched so far is restored. Target paths must stay inside the root (no
 absolute paths, no `..`, no symlink escapes), and members must still be
 size-preserving.
 
+Patch entries can also declare `"depends_on": ["org.you.other"]` (topologically
+sorted, cycles refused, and a disabled dependency blocks the dependent patch) and
+`"conflicts_with": ["org.you.rival"]` (both applicable → the whole run is
+refused). No scripting, no shell: ordering constraints are data too.
+
 ### Overlay size changes (v0.3)
 
 `surreal diff` now also handles two builds whose **overlay** differs in size —
@@ -359,7 +364,8 @@ contributor is allowed to modify.
 | **M2+ (shipped, v0.5)** | `op: extend-section` / `op: add-section`: header rewriting, SizeOfImage growth, replay-proven generation, post-write proof |
 | **M3-lite (shipped, v0.4)** | `surreal collection`: N size-preserving bundles applied as one transaction with a single backup |
 | **M3 vault (shipped, v0.5)** | `target` per patch entry → N binaries patched as one transaction, per-file backups and journals |
-| M3 | patch dependencies/conflicts, patch scripting (sandboxed, no shell) |
+| **M3 deps (shipped, v0.5)** | `depends_on` topological ordering, `conflicts_with` refusal, unique ids |
+| M3 | patch scripting (sandboxed, no shell), local repo client |
 | M4 | `--tui` and `apply --repo` for curated bundle collections |
 
 MIT licensed. Not affiliated with Morphe, ReVanced or any vendor whose software

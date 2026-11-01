@@ -42,6 +42,19 @@ Useful flags: `--require-signature`, `--trusted-key HEX`,
 * `"enabled": false` disables an entry without editing anything else.
 * `"required": true` is recorded for humans and CI; it does not change the
   all-or-nothing behaviour (every selected patch is required by definition).
+* `"depends_on": ["org.you.other"]` — this patch must be applied *after* the
+  listed bundle ids. The loader topologically sorts the set (cycles are an
+  error, self-dependency is an error, and the id must exist in the same
+  collection), while `order` still decides the sequence between unrelated
+  patches. A dependency that ends up disabled or inapplicable blocks the patch:
+  you get "patch X depends on Y, which is disabled" instead of a half-applied
+  result.
+* `"conflicts_with": ["org.you.rival"]` — if both bundles are in the set and
+  applicable, the whole run is refused. Ids that are not in the set are allowed
+  (the conflicting patch may live in another collection), so this is a
+  forward-compatible guard.
+* Bundle ids must be unique inside one collection, otherwise ordering and
+  dependency resolution would be ambiguous.
 
 ## The transaction
 

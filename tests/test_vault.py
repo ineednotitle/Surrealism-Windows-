@@ -121,7 +121,13 @@ class TestPreflight(VaultCase):
 
     def test_missing_target_file(self):
         self.main_entries()
-        self.entries.append({"bundle": "main-jump.morph", "target": "nope.exe"})
+        new = write(self.path("phantom.bin"),
+                    edit(self.helper_bytes, 0x201, b"PHANTOM\0"))
+        bundle, _ = diffgen.build_bundle(self.helper, new, "org.vault.phantom",
+                                        "phantom")
+        bundle.save(os.path.join(self.dir, "phantom.morph"))
+        self.entries.append({"bundle": "phantom.morph", "target": "nope.exe",
+                             "order": 1})
         c = self.load()
         with self.assertRaises(coll.CollectionError) as ctx:
             coll.resolve_root(c, self.root)
