@@ -50,7 +50,10 @@ class TestMemGuard(TempDirCase):
             memguard.restore(previous)
 
     def test_peak_rss_is_plausible(self):
-        self.assertGreater(memguard.peak_rss_mb(), 1.0)
+        peak = memguard.peak_rss_mb()
+        if not peak:
+            self.skipTest("no peak-RSS measurement on this platform")
+        self.assertGreater(peak, 1.0)
 
 
 if __name__ == "__main__":

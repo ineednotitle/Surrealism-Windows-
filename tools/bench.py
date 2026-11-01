@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import resource
 import shutil
 import sys
 import tempfile
@@ -20,7 +19,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from surreal import patcher                       # noqa: E402
+from surreal import memguard, patcher             # noqa: E402
 from surreal.diffgen import build_bundle          # noqa: E402
 from surreal.journal import Journal               # noqa: E402
 from surreal.patchfile import Bundle              # noqa: E402
@@ -31,8 +30,8 @@ from surreal.util import human_size, sha256_file  # noqa: E402
 
 
 def peak_rss_mb() -> float:
-    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return usage / 1024.0 if sys.platform != "darwin" else usage / (1024.0 * 1024.0)
+    """Peak RSS in MB (0.0 when the platform offers no measurement)."""
+    return memguard.peak_rss_mb()
 
 
 def main() -> int:

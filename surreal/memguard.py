@@ -28,46 +28,75 @@ class MemoryLimitError(Exception):
 
 
 def peak_rss_mb() -> float:
-    """Best-effort peak resident set size of this process, in MB."""
+    """Best-effort peak resident set size of this process, in MB.
+
+    Returns ``0.0`` when the platform does not offer a measurement, so callers
+    must treat 0 as "unknown" rather than "used no memory".
+    """
     try:
-        import resource  # POSIX
+        import resource  # POSIX only
 
         usage = getattr(resource, "RUSAGE_SELF", None)
         peak = resource.getrusage(usage).ru_maxrss
-        # Linux: KiB, macOS: bytes
         import sys
 
+        # Linux reports KiB, macOS reports bytes
         return peak / (1024.0 * 1024.0) if sys.platform == "darwin" else peak / 1024.0
     except Exception:
         pass
     if os.name == "nt":  # pragma: no cover - Windows only
+        return _windows_peak_rss_mb()
+    return 0.0
+
+
+def _windows_peak_rss_mb() -> float:  # pragma: no cover - Windows only
+    """Peak working set via psapi/kernel32 (no dependencies, no ctypes on POSIX)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        counters = PROCESS_MEMORY_COUNTERS()
+        counters.cb = ctypes.sizeof(counters)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.GetCurrentProcess()
+        candidates = []
         try:
-            import ctypes
-            from ctypes import wintypes
-
-            class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
-                _fields_ = [
-                    ("cb", wintypes.DWORD),
-                    ("PageFaultCount", wintypes.DWORD),
-                    ("PeakWorkingSetSize", ctypes.c_size_t),
-                    ("WorkingSetSize", ctypes.c_size_t),
-                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                    ("PagefileUsage", ctypes.c_size_t),
-                    ("PeakPagefileUsage", ctypes.c_size_t),
-                ]
-
-            counters = PROCESS_MEMORY_COUNTERS()
-            counters.cb = ctypes.sizeof(counters)
-            handle = ctypes.windll.kernel32.GetCurrentProcess()  # type: ignore[attr-defined]
-            psapi = ctypes.windll.psapi  # type: ignore[attr-defined]
-            if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters),
-                                          counters.cb):
-                return counters.PeakWorkingSetSize / float(MB)
-        except Exception:
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            candidates.append(psapi.GetProcessMemoryInfo)
+        except OSError:
             pass
+        if hasattr(kernel32, "K32GetProcessMemoryInfo"):
+            candidates.append(kernel32.K32GetProcessMemoryInfo)
+        for function in candidates:
+            try:
+                function.argtypes = [ctypes.c_void_p,
+                                     ctypes.POINTER(PROCESS_MEMORY_COUNTERS),
+                                     wintypes.DWORD]
+                function.restype = wintypes.BOOL
+                if function(ctypes.c_void_p(handle), ctypes.byref(counters),
+                            counters.cb):
+                    peak = max(counters.PeakWorkingSetSize,
+                               counters.WorkingSetSize)
+                    if peak:
+                        return peak / float(MB)
+            except Exception:
+                continue
+    except Exception:
+        pass
     return 0.0
 
 

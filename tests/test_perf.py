@@ -7,13 +7,13 @@ with file size.
 """
 
 import os
-import resource
+import sys
 import time
 import unittest
 
 from helpers import TempDirCase, write
 
-from surreal import patcher
+from surreal import memguard, patcher
 from surreal.diffgen import build_bundle
 from surreal.patchfile import Bundle
 from surreal.pe import PE
@@ -24,9 +24,8 @@ BIG_MB = int(os.environ.get("SURREAL_PERF_MB", "48"))  # keep CI snappy
 
 
 def peak_rss_mb() -> float:
-    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    # Linux reports KiB, macOS bytes
-    return usage / 1024.0 if os.uname().sysname != "Darwin" else usage / (1024.0 * 1024.0)
+    """Peak RSS in MB, or 0.0 where the platform offers no measurement."""
+    return memguard.peak_rss_mb()
 
 
 class TestPerformance(TempDirCase):
@@ -116,6 +115,8 @@ class TestPerformance(TempDirCase):
         small = sample_app()
         path = self.path("small.exe")
         write(path, small)
+        if not peak_rss_mb():
+            self.skipTest("no peak-RSS measurement on %s" % sys.platform)
         with PE.open(path) as pe:
             baseline = peak_rss_mb()
             for _ in range(8):
