@@ -15,7 +15,10 @@ block_cipher = None
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 
 a = Analysis(
-    [os.path.join(ROOT, "surreal", "cli.py")],
+    # Entry point must import the package normally: pointing PyInstaller at
+    # surreal/cli.py would run it as __main__ and break its relative imports
+    # ("attempted relative import with no known parent package") at startup.
+    [os.path.join(ROOT, "surreal.py")],
     pathex=[ROOT],
     binaries=[],
     datas=[],
