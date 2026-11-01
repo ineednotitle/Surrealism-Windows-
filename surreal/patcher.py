@@ -1,0 +1,444 @@
+"""Apply / check / revert a ``.morph`` bundle against a target binary.
+
+Invariants (see PLAN.md §3.3):
+
+* nothing is written until *every* hunk resolved and verified;
+* the original is backed up before the first byte is written;
+* the write goes to ``<target>.surreal.tmp`` in the same directory and is
+  promoted with ``os.replace`` (atomic on NTFS and POSIX);
+* the PE checksum is recomputed so the image still loads cleanly;
+* every mutation is journalled with before/after hashes.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import struct
+import tempfile
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+from .journal import Journal, fsync_dir
+from .patchfile import Bundle, Hunk
+from .pe import PE, PEError, fold_checksum, sum_words
+from .scanner import ScanError, find_pattern
+from .util import format_hex, sha256_file, sha256_bytes
+
+
+class PatchError(Exception):
+    def __init__(self, message: str, code: int = 3):
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass
+class Resolved:
+    index: int
+    offset: int
+    length: int
+    expect: bytes
+    replace: bytes
+    located_by: str
+
+
+@dataclass
+class Plan:
+    target: str
+    original_sha256: str
+    resolved: List[Resolved] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    new_checksum: Optional[int] = None
+    old_checksum: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "target": self.target,
+            "original_sha256": self.original_sha256,
+            "hunks": [
+                {"index": r.index, "offset": r.offset, "length": r.length,
+                 "expect": format_hex(r.expect), "replace": format_hex(r.replace),
+                 "located_by": r.located_by}
+                for r in self.resolved
+            ],
+            "old_checksum": self.old_checksum,
+            "new_checksum": self.new_checksum,
+            "notes": self.notes,
+            "warnings": self.warnings,
+        }
+
+
+# --------------------------------------------------------------------------- #
+# identity
+# --------------------------------------------------------------------------- #
+def check_identity(bundle: Bundle, pe: PE, target_path: str, sha: str,
+                   accept_drift: bool = False) -> List[str]:
+    """Verify the bundle was authored for this file. Returns warnings."""
+    warnings: List[str] = []
+    tgt = bundle.target
+    problems: List[str] = []
+
+    want_size = tgt.get("size")
+    if want_size is not None and int(want_size) != pe.size:
+        problems.append("size %d (bundle expects %s)" % (pe.size, want_size))
+
+    want_sha = (tgt.get("sha256") or "").lower()
+    if want_sha and want_sha != sha:
+        problems.append("sha256 %s… (bundle expects %s…)" % (sha[:16], want_sha[:16]))
+
+    peinfo = tgt.get("pe") or {}
+    if peinfo:
+        if peinfo.get("machine") and int(peinfo["machine"], 0) != pe.machine:
+            problems.append("machine 0x%04X vs 0x%s"
+                            % (pe.machine, peinfo["machine"]))
+        if peinfo.get("magic") and int(peinfo["magic"], 0) != pe.magic:
+            problems.append("optional-header magic mismatch")
+        if peinfo.get("entrypoint_rva") is not None and \
+                int(peinfo["entrypoint_rva"]) != pe.entrypoint_rva:
+            warnings.append("entry point moved (0x%X → 0x%X)"
+                            % (int(peinfo["entrypoint_rva"]), pe.entrypoint_rva))
+
+    want_name = tgt.get("filename")
+    if want_name and want_name.lower() != os.path.basename(target_path).lower():
+        warnings.append("bundle was authored against %r, target is %r"
+                        % (want_name, os.path.basename(target_path)))
+
+    # per-section fingerprints: warn only, sections legitimately shift
+    for want in tgt.get("sections") or []:
+        name = want.get("name")
+        match = next((s for s in pe.sections if s.name == name), None)
+        if match is None:
+            warnings.append("section %r from the bundle is missing" % name)
+            continue
+        if want.get("raw_sha256") and match.raw_sha256 and \
+                want["raw_sha256"] != match.raw_sha256:
+            warnings.append("section %s differs from the authored build" % name)
+
+    if problems:
+        if accept_drift:
+            warnings.append("drift accepted (--accept-drift): " + "; ".join(problems))
+        else:
+            raise PatchError(
+                "target does not match this bundle: " + "; ".join(problems) +
+                "\n  → patch the build the bundle was written for, or re-run with "
+                "--accept-drift if you accept the risk", code=3)
+    return warnings
+
+
+# --------------------------------------------------------------------------- #
+# resolution
+# --------------------------------------------------------------------------- #
+def resolve_anchor(bundle: Bundle, anchor_index: int, pe: PE) -> int:
+    anchor = bundle.anchors[anchor_index]
+    try:
+        hits = find_pattern(pe.data, anchor.pattern, limit=64)
+    except ScanError as exc:
+        raise PatchError("anchor %d (%s) is unusable: %s"
+                         % (anchor_index, anchor.name, exc)) from exc
+    if not hits:
+        raise PatchError("anchor %d (%s) not found — this is a different build of "
+                         "the target" % (anchor_index, anchor.name), code=3)
+    if len(hits) > 1:
+        if anchor.unique:
+            raise PatchError(
+                "anchor %d (%s) matches %d places (expected exactly 1): %s"
+                % (anchor_index, anchor.name, len(hits),
+                   ", ".join("0x%X" % h for h in hits[:8])), code=3)
+        if anchor.file_offset is not None and anchor.file_offset in hits:
+            return anchor.file_offset
+        raise PatchError("anchor %d (%s) is ambiguous (%d matches) and has no "
+                         "file_offset to disambiguate" % (anchor_index, anchor.name, len(hits)),
+                         code=3)
+    # An anchor that moved is still an anchor — that is the whole point: the
+    # hunk's expect-bytes are the final authority, and they are checked next.
+    return hits[0]
+
+
+def resolve_hunk(bundle: Bundle, hunk: Hunk, index: int, pe: PE,
+                 anchor_offsets: Dict[int, int]) -> Resolved:
+    candidates: List[tuple] = []
+    if hunk.anchor is not None:
+        base = anchor_offsets.get(hunk.anchor)
+        if base is None:
+            raise PatchError("hunk %d references unresolved anchor %d" % (index, hunk.anchor))
+        candidates.append((base + hunk.delta, "anchor %d+%d" % (hunk.anchor, hunk.delta)))
+    if hunk.section is not None and hunk.rva is not None:
+        sec = next((s for s in pe.sections if s.name == hunk.section), None)
+        if sec is not None:
+            off = pe.rva_to_offset(hunk.rva)
+            if off is not None and sec.contains_rva(hunk.rva):
+                candidates.append((off, "section %s+rva 0x%X" % (hunk.section, hunk.rva)))
+    if hunk.offset is not None:
+        candidates.append((hunk.offset, "file offset 0x%X" % hunk.offset))
+
+    if not candidates:
+        raise PatchError("hunk %d has no usable locator (need anchor, section+rva or offset)"
+                         % index)
+
+    usable = [(o, how) for o, how in candidates if 0 <= o and o + hunk.length <= pe.size]
+    if not usable:
+        raise PatchError("hunk %d resolves outside the file" % index, code=3)
+
+    # all locators must agree; disagreement means the bundle was edited by hand
+    # or the build shifted in a way we cannot prove is safe
+    if len({o for o, _ in usable}) > 1:
+        raise PatchError(
+            "hunk %d: locators disagree (%s) — refusing to guess"
+            % (index, ", ".join("%s→0x%X" % (how, o) for o, how in usable)), code=3)
+
+    offset, how = usable[0]
+    expect = bytes(v if v is not None else 0 for v in hunk.expect)
+    actual = bytes(pe.data[offset:offset + hunk.length])
+    wildcards = [i for i, v in enumerate(hunk.expect) if v is None]
+    mismatch = [i for i in range(hunk.length)
+                if i not in wildcards and actual[i] != hunk.expect[i]]
+    if mismatch:
+        preview = format_hex(actual)
+        raise PatchError(
+            "hunk %d at 0x%X (%s) does not contain the expected original bytes\n"
+            "    expected: %s\n    found:    %s\n"
+            "    first mismatch at byte %d — the bundle was made for a different build"
+            % (index, offset, how,
+               " ".join("%02X" % v if v is not None else "??" for v in hunk.expect),
+               preview, mismatch[0]), code=3)
+
+    return Resolved(index=index, offset=offset, length=hunk.length, expect=actual,
+                    replace=hunk.replace, located_by=how)
+
+
+def build_plan(bundle: Bundle, target_path: str, accept_drift: bool = False) -> Plan:
+    if not os.path.isfile(target_path):
+        raise PatchError("target not found: %s" % target_path, code=5)
+    sha = sha256_file(target_path)
+    try:
+        pe = PE.open(target_path)
+    except (PEError, OSError) as exc:
+        raise PatchError("target is not a readable PE image: %s" % exc, code=3) from exc
+    try:
+        plan = Plan(target=os.path.abspath(target_path), original_sha256=sha)
+        plan.warnings.extend(check_identity(bundle, pe, target_path, sha, accept_drift))
+
+        if pe.has_signature:
+            plan.warnings.append(
+                "target carries an Authenticode signature — patching invalidates it "
+                "(Windows SmartScreen may warn afterwards)")
+
+        anchor_offsets: Dict[int, int] = {}
+        for i in range(len(bundle.anchors)):
+            anchor_offsets[i] = resolve_anchor(bundle, i, pe)
+            plan.notes.append("anchor %d (%s) → 0x%X"
+                              % (i, bundle.anchors[i].name, anchor_offsets[i]))
+
+        for idx, hunk in enumerate(bundle.hunks):
+            if not hunk.enabled:
+                plan.notes.append("hunk %d disabled, skipped" % idx)
+                continue
+            plan.resolved.append(resolve_hunk(bundle, hunk, idx, pe, anchor_offsets))
+
+        _check_overlaps(plan.resolved)
+
+        plan.old_checksum = pe.stored_checksum
+        plan.new_checksum = _predict_checksum(pe, plan.resolved)
+        return plan
+    finally:
+        pe.close()
+
+
+def _check_overlaps(resolved: List[Resolved]) -> None:
+    ordered = sorted(resolved, key=lambda r: r.offset)
+    for a, b in zip(ordered, ordered[1:]):
+        if a.offset + a.length > b.offset:
+            raise PatchError("hunks %d and %d overlap at 0x%X"
+                             % (a.index, b.index, b.offset), code=3)
+    total = sum(r.length for r in resolved)
+    if total == 0:
+        raise PatchError("nothing to patch", code=3)
+
+
+def _predict_checksum(pe: PE, resolved: List[Resolved]) -> int:
+    """Checksum of the image after the hunks are applied (no file is written).
+
+    Only the bytes that actually change are re-summed: word-aligned windows
+    around each hunk, widened by one byte so a hunk starting at an odd offset
+    still accounts for the words it straddles.
+    """
+    total = pe.word_sum()
+    skip = pe._checksum_offset
+    mv = memoryview(pe.data)
+
+    regions: List[List[int]] = []
+    for r in sorted(resolved, key=lambda x: x.offset):
+        start = r.offset & ~1
+        end = min((r.offset + r.length + 1) & ~1, pe.size)
+        if regions and start <= regions[-1][1]:
+            regions[-1][1] = max(regions[-1][1], end)
+        else:
+            regions.append([start, end])
+
+    for start, end in regions:
+        if start < skip + 4 and end > skip:
+            continue  # the CheckSum field itself: overwritten at write time
+        old_sum = sum_words(mv[start:end])
+        buf = bytearray(mv[start:end])
+        for r in resolved:
+            lo = max(start, r.offset)
+            hi = min(end, r.offset + r.length)
+            if lo < hi:
+                buf[lo - start:hi - start] = r.replace[lo - r.offset:hi - r.offset]
+        total += sum_words(memoryview(bytes(buf))) - old_sum
+
+    return fold_checksum(total, pe.size)
+
+
+# --------------------------------------------------------------------------- #
+# applying
+# --------------------------------------------------------------------------- #
+def apply_bundle(bundle: Bundle, target_path: str, dry_run: bool = False,
+                 no_backup: bool = False, no_checksum: bool = False,
+                 accept_drift: bool = False, keep_backups: int = 3) -> Dict[str, Any]:
+    blocked = bundle.is_policy_blocked()
+    if blocked:
+        raise PatchError("refusing to apply: " + blocked, code=4)
+
+    plan = build_plan(bundle, target_path, accept_drift=accept_drift)
+    result: Dict[str, Any] = {
+        "bundle": bundle.id,
+        "name": bundle.name,
+        "target": plan.target,
+        "dry_run": dry_run,
+        "hunks": len(plan.resolved),
+        "notes": plan.notes,
+        "warnings": plan.warnings,
+        "old_checksum": plan.old_checksum,
+        "new_checksum": plan.new_checksum,
+    }
+    if dry_run:
+        result["sha256_before"] = plan.original_sha256
+        result["sha256_after"] = "(dry run)"
+        return result
+
+    target = os.path.abspath(target_path)
+    directory = os.path.dirname(target)
+    ext = os.path.splitext(target)[1] or ".bin"
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix=".surreal-", suffix=ext + ".tmp", dir=directory)
+    os.close(tmp_fd)
+
+    journal = Journal(target)
+    backup_path: Optional[str] = None
+    try:
+        # 1. copy (streamed, 1 MiB) — never load the binary in memory
+        shutil.copyfile(target, tmp_path)
+        if sha256_file(tmp_path) != plan.original_sha256:
+            raise PatchError("working copy is not identical to the target (disk error?)",
+                             code=5)
+
+        # 2. patch the copy
+        with open(tmp_path, "r+b") as fh:
+            for r in sorted(plan.resolved, key=lambda x: x.offset):
+                fh.seek(r.offset)
+                fh.write(r.replace)
+            if not no_checksum:
+                fh.flush()
+                _write_checksum(fh, plan.new_checksum or 0)
+            fh.flush()
+            os.fsync(fh.fileno())
+
+        new_sha = sha256_file(tmp_path)
+
+        # 3. verify the result reads back as a valid PE
+        try:
+            with PE.open(tmp_path) as pe2:
+                if not no_checksum and not pe2.checksum_valid():
+                    raise PatchError("post-patch checksum verification failed", code=5)
+        except PEError as exc:
+            raise PatchError("patched copy is no longer a valid PE (%s) — original "
+                             "untouched" % exc, code=5) from exc
+
+        # 4. backup, then atomically swap in the patched copy
+        if not no_backup:
+            backup_path = journal.backup(bundle.id)
+        os.replace(tmp_path, target)
+        fsync_dir(directory)
+
+        result.update({
+            "sha256_before": plan.original_sha256,
+            "sha256_after": new_sha,
+            "backup": backup_path,
+            "bytes_written": sum(r.length for r in plan.resolved),
+        })
+        journal.record(
+            "apply", bundle_id=bundle.id, bundle_name=bundle.name,
+            bundle_sha256=sha256_file(bundle.path) if bundle.path else None,
+            sha256_before=plan.original_sha256, sha256_after=new_sha,
+            backup=backup_path, hunks=[r.index for r in plan.resolved],
+            checksum_recomputed=not no_checksum,
+        )
+        if keep_backups > 0:
+            result["pruned"] = journal.prune(keep_backups)
+        return result
+    except BaseException:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _write_checksum(fh, checksum: int) -> None:
+    fh.seek(0x3C)
+    lfanew = struct.unpack("<I", fh.read(4))[0]
+    # CheckSum field lives at OptionalHeader + 64 == e_lfanew + 24 + 64
+    fh.seek(lfanew + 88)
+    fh.write(struct.pack("<I", checksum & 0xFFFFFFFF))
+
+
+# --------------------------------------------------------------------------- #
+# reverting
+# --------------------------------------------------------------------------- #
+def revert(target_path: str) -> Dict[str, Any]:
+    target = os.path.abspath(target_path)
+    if not os.path.isfile(target):
+        raise PatchError("target not found: %s" % target, code=5)
+    journal = Journal(target)
+    entry = journal.last(actions=("apply", "revert"))
+    if entry is None:
+        raise PatchError("no journal entries for %s — nothing to revert" % target, code=3)
+    if entry.get("action") == "revert":
+        raise PatchError("the last recorded action was already a revert", code=3)
+    backup = entry.get("backup")
+    if not backup or not os.path.isfile(backup):
+        raise PatchError("backup missing: %s" % backup, code=5)
+
+    current_sha = sha256_file(target)
+    if entry.get("sha256_after") and current_sha != entry["sha256_after"]:
+        raise PatchError(
+            "target changed since it was patched (sha256 %s… vs expected %s…); "
+            "refusing to overwrite — restore %s manually if you mean it"
+            % (current_sha[:16], entry["sha256_after"][:16], backup), code=3)
+
+    directory = os.path.dirname(target)
+    ext = os.path.splitext(target)[1] or ".bin"
+    fd, tmp_path = tempfile.mkstemp(prefix=".surreal-", suffix=ext + ".tmp", dir=directory)
+    os.close(fd)
+    try:
+        shutil.copyfile(backup, tmp_path)
+        if sha256_file(tmp_path) != entry.get("sha256_before"):
+            raise PatchError("backup does not match the recorded pre-patch hash", code=5)
+        os.replace(tmp_path, target)
+        fsync_dir(directory)
+    except BaseException:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+    restored = sha256_file(target)
+    journal.record("revert", bundle_id=entry.get("bundle_id"), backup=backup,
+                   sha256_before=current_sha, sha256_after=restored)
+    return {"target": target, "restored_sha256": restored,
+            "was_sha256": current_sha, "backup": backup,
+            "bundle_id": entry.get("bundle_id")}

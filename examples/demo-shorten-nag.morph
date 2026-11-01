@@ -1,0 +1,94 @@
+{
+  "format": "surreal.morph",
+  "format_version": 1,
+  "id": "org.surreal.demo.shorten-nag",
+  "name": "Demo: blank the trial nag + flip one branch",
+  "version": "1.0.0",
+  "description": "Generated from surreal.testkit fixtures. Two edits: a conditional jump is inverted and the nag string is blanked in place. Same-length, size-preserving.",
+  "notes": "This is a practice bundle for the generated demo_app.exe. It is not a patch for any real product.",
+  "created_utc": "2026-11-01T00:00:00Z",
+  "author": "surreal demo",
+  "tool": {
+    "name": "surreal",
+    "version": "0.1.0"
+  },
+  "target": {
+    "filename": "demo_app.exe",
+    "size": 2048,
+    "sha256": "4d51cec411ac4bf2856d007044be52d8da0713e4abe227f02244193c66251408",
+    "pe": {
+      "magic": "0x20B",
+      "machine": "0x8664",
+      "timestamp": 1593835520,
+      "entrypoint_rva": 4096,
+      "image_base": 5368709120
+    },
+    "authenticode": false,
+    "sections": [
+      {
+        "name": ".text",
+        "rva": 4096,
+        "raw_size": 512,
+        "raw_sha256": "b8649f444afc99b469c878ae9411227be76ca16a921d44da7b9d6fc13820c946"
+      },
+      {
+        "name": ".rdata",
+        "rva": 8192,
+        "raw_size": 512,
+        "raw_sha256": "46ed15310bc6e63f7c8f654a3077b7cd6efa7ae0583d95f6c6fced9bfb05f6de"
+      },
+      {
+        "name": ".data",
+        "rva": 12288,
+        "raw_size": 512,
+        "raw_sha256": "9758628d2a46a2542de4786e2b4df3af701f6571bae4df97ae9fc1b73669c367"
+      }
+    ]
+  },
+  "anchors": [
+    {
+      "name": "anchor_0",
+      "pattern": "50 48 8D 15 F0 E0 D0 C0",
+      "unique": true,
+      "file_offset": 585,
+      "rva": 4169,
+      "section": ".text",
+      "comment": "8 bytes of literal context at file offset 0x249"
+    },
+    {
+      "name": "anchor_1",
+      "pattern": "BF BD 20 64 65 6D 6F 00",
+      "unique": true,
+      "file_offset": 1089,
+      "rva": 8257,
+      "section": ".rdata",
+      "comment": "8 bytes of literal context at file offset 0x441"
+    }
+  ],
+  "hunks": [
+    {
+      "anchor": 0,
+      "delta": 8,
+      "section": ".text",
+      "rva": 4177,
+      "offset": 593,
+      "expect": "7F",
+      "replace": "7E",
+      "comment": "bytes 593..594"
+    },
+    {
+      "anchor": 1,
+      "delta": 8,
+      "section": ".rdata",
+      "rva": 8265,
+      "offset": 1097,
+      "expect": "54 72 69 61 6C 20 65 78 70 69 72 65 64 2E 20 41 63 74 69 76 61 74 65 20 74 6F 20 63 6F 6E 74 69 6E 75 65 2E",
+      "replace": "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00",
+      "comment": "bytes 1097..1133"
+    }
+  ],
+  "policy": {
+    "requires_rights_attestation": true,
+    "forbidden_categories": []
+  }
+}

@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "arena/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        python: ["3.9", "3.12"]
+        exclude:
+          - os: macos-latest
+            python: "3.9"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Show interpreter
+        run: python --version
+      - name: Unit tests (stdlib only, no pip install)
+        run: python run_tests.py -v
+      - name: Self test (build → diff → check → apply → revert)
+        run: python -m surreal selftest
+      - name: CLI smoke
+        run: |
+          python -m surreal --help
+          python -m surreal demo --out demo-out
+          python -m surreal inspect demo-out/demo_app.exe --json
+          python -m surreal check demo-out/demo-shorten-nag.morph --target demo-out/demo_app.exe
+      - name: Performance budget
+        run: python tools/bench.py --mb 32
+
+  lint:
+    name: static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile every module (syntax + import graph)
+        run: python -m compileall -q surreal && python -c "import surreal.cli, surreal.testkit"
+      - name: No network imports in the tool (it must run offline)
+        run: |
+          if grep -rnE "^\s*(import|from)\s+(socket|urllib|http|ftplib|requests|ssl)" surreal/; then
+            echo "::error::surreal must not use the network"; exit 1
+          fi
+      - name: No shell execution in the tool
+        run: |
+          if grep -rnE "(subprocess|os\.system|popen|eval\(|exec\()" surreal/; then
+            echo "::error::surreal must not execute anything"; exit 1
+          fi
+
+  windows-exe:
+    name: build surreal.exe
+    needs: [test, lint]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          python -m PyInstaller --clean --noconfirm build/surreal.spec
+      - name: Smoke test the frozen binary
+        shell: pwsh
+        run: |
+          ./dist/surreal.exe --version
+          ./dist/surreal.exe selftest
+          ./dist/surreal.exe demo --out frozen-demo
+          ./dist/surreal.exe check frozen-demo/demo-shorten-nag.morph --target frozen-demo/demo_app.exe
+          $size = "{0:N1} MB" -f ((Get-Item ./dist/surreal.exe).Length / 1MB)
+          "size: $size" | Tee-Object -FilePath size.txt
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: surreal-windows-x64
+          path: |
+            dist/surreal.exe
+            size.txt
+          if-no-files-found: error
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/surreal.exe
+          generate_release_notes: true
