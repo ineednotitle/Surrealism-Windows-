@@ -683,7 +683,7 @@ def apply_bundle(bundle: Bundle, target_path: str, dry_run: bool = False,
         # 4. backup, then atomically swap in the patched copy
         if not no_backup:
             backup_path = journal.backup(bundle.id)
-        os.replace(tmp_path, target)
+        _replace_target(tmp_path, target)
         fsync_dir(directory)
 
         result.update({
@@ -715,6 +715,25 @@ def apply_bundle(bundle: Bundle, target_path: str, dry_run: bool = False,
         raise
     finally:
         lock.release()
+
+
+def _replace_target(tmp_path: str, target: str) -> None:
+    """Promote the patched copy, translating Windows' lock errors.
+
+    On Windows the swap fails with ``PermissionError``/``WinError 32`` when the
+    executable is running, a scanner holds a handle, or the file is marked
+    read-only. A bare ``IO error: [WinError 32]`` is useless, so say what to do.
+    """
+    try:
+        os.replace(tmp_path, target)
+    except PermissionError as exc:
+        writable = os.access(target, os.W_OK) if os.path.exists(target) else True
+        hint = ("the file is read-only — clear the read-only attribute"
+                if not writable else
+                "the file is locked: close the application, and add an "
+                "antivirus exclusion for this folder if a scanner is holding it")
+        raise PatchError("cannot replace %s (%s) — %s"
+                         % (target, exc, hint), code=5) from exc
 
 
 def _checksum_of_file(path: str) -> int:
@@ -807,7 +826,7 @@ def _revert_locked(target: str) -> Dict[str, Any]:
         shutil.copyfile(backup, tmp_path)
         if sha256_file(tmp_path) != entry.get("sha256_before"):
             raise PatchError("backup does not match the recorded pre-patch hash", code=5)
-        os.replace(tmp_path, target)
+        _replace_target(tmp_path, target)
         fsync_dir(directory)
     except BaseException:
         try:

@@ -317,6 +317,17 @@ def cmd_diff(args, console: Console) -> int:
     return EXIT_OK
 
 
+def _hunk_amount(h) -> str:
+    """Short human description of how big a hunk's effect is."""
+    if h.op == "append":
+        return "+%d bytes at EOF" % len(h.replace)
+    if h.op == "truncate":
+        return "-%d bytes at EOF" % len(h.expect)
+    if h.op in ("extend-section", "add-section"):
+        return "+%d bytes (padded to FileAlignment)" % len(h.replace)
+    return "%d bytes" % h.length
+
+
 def cmd_info(args, console: Console) -> int:
     try:
         bundle = Bundle.load(args.bundle, strict=not args.lax)
@@ -352,21 +363,18 @@ def cmd_info(args, console: Console) -> int:
         elif h.op == "truncate":
             where.append("end of file (truncate -%d bytes)" % len(h.expect))
         elif h.op == "extend-section":
-            where.append("header surgery: grow %s (+%d bytes)"
-                         % (h.section, len(h.replace)))
+            where.append("header surgery: grow %s" % h.section)
         elif h.op == "add-section":
-            where.append("header surgery: add %s (+%d bytes)"
-                         % (h.name, len(h.replace)))
+            where.append("header surgery: add %s" % h.name)
         if h.anchor is not None:
             where.append("anchor %d+%d" % (h.anchor, h.delta))
         if h.section and h.rva is not None:
             where.append("%s+0x%X" % (h.section, h.rva))
         if h.offset is not None:
             where.append("offset 0x%X" % h.offset)
-        console.say("    [%d] %-34s %d bytes%s" %
-                    (i, ", ".join(where) or "unlocated", h.length,
-                     "" if not h.enabled else "" if h.enabled and h.op == "patch"
-                     else ""))
+        console.say("    [%d] %-46s %s%s"
+                    % (i, ", ".join(where) or "unlocated",
+                       _hunk_amount(h), "" if h.enabled else "   (disabled)"))
         if h.expect:
             console.say("        - %s" % " ".join(
                 "%02X" % v if v is not None else "??" for v in h.expect)[:100])
@@ -775,11 +783,30 @@ def cmd_collection(args, console: Console) -> int:
             policy.require_acceptance()
         except PermissionError as exc:
             return _die(console, str(exc), EXIT_POLICY)
-        if not args.yes and not console.json_mode:
+        if not args.dry_run and not args.yes and not console.json_mode:
             if not _confirm(console, "apply vault %r to %s?"
                             % (coll.name, os.path.abspath(target)), args.yes):
                 console.err("aborted (no changes written)")
                 return EXIT_MISMATCH
+        if args.dry_run:
+            try:
+                report = collections.preflight_vault(
+                    coll, target, require_signature=args.require_signature,
+                    extra_trusted=args.trusted_key,
+                    allow_abs_address=args.allow_abs_address)
+            except (collections.CollectionError, patcher.PatchError) as exc:
+                return _die(console, str(exc), getattr(exc, "code", EXIT_MISMATCH))
+            if console.json_mode:
+                console.emit_json({"ok": True, "dry_run": True, "report": report})
+                return EXIT_OK
+            console.head(BANNER)
+            console.ok("dry run: vault %r would patch %d file(s) under %s"
+                       % (coll.name, len(report["files"]), report["root"]))
+            for item in report["files"]:
+                console.say("    · %-32s %d patch(es) → %s…"
+                            % (item["file"], len(item["patches"]),
+                               item["result_sha256"][:8]))
+            return EXIT_OK
         try:
             vresult = collections.apply_vault(
                 coll, target, require_signature=args.require_signature,
@@ -839,11 +866,28 @@ def cmd_collection(args, console: Console) -> int:
         policy.require_acceptance()
     except PermissionError as exc:
         return _die(console, str(exc), EXIT_POLICY)
-    if not args.yes and not console.json_mode:
+    if not args.dry_run and not args.yes and not console.json_mode:
         if not _confirm(console, "apply %r to %s?"
                         % (coll.name, os.path.abspath(target)), args.yes):
             console.err("aborted (no changes written)")
             return EXIT_MISMATCH
+    if args.dry_run:
+        try:
+            report = collections.preflight(
+                coll, target, require_signature=args.require_signature,
+                extra_trusted=args.trusted_key,
+                allow_abs_address=args.allow_abs_address)
+        except (collections.CollectionError, patcher.PatchError) as exc:
+            return _die(console, str(exc), getattr(exc, "code", EXIT_MISMATCH))
+        if console.json_mode:
+            console.emit_json({"ok": True, "dry_run": True, "report": report})
+            return EXIT_OK
+        console.head(BANNER)
+        console.ok("dry run: %d patch(es) from %r would apply to %s"
+                   % (len(report["applicable"]), coll.name,
+                      os.path.basename(target)))
+        console.kv("result sha256", report["result_sha256"])
+        return EXIT_OK
     try:
         result = collections.apply_collection(
             coll, target, require_signature=args.require_signature,
@@ -1253,6 +1297,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--trusted-key", action="append", metavar="HEX", default=[])
     sp.add_argument("--allow-abs-address", action="store_true")
     sp.add_argument("--keep-backups", type=int, default=3)
+    sp.add_argument("--dry-run", action="store_true",
+                    help="check only: preflight on a temp copy, write nothing")
     sp.add_argument("--lax", action="store_true")
     sp.set_defaults(func=cmd_collection)
 

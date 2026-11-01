@@ -61,7 +61,7 @@ $ python -m surreal demo
   hunks:  2 (all anchored: 2)
 
 $ python -m surreal inspect surreal-demo/demo_app.exe
-surreal 0.2.0 — Surrealism Window · windows patch workbench
+surreal 0.5.0 — Surrealism Window · windows patch workbench
   …\surreal-demo\demo_app.exe  (2.0 KiB)
   sha256 4d51cec411ac4bf2856d007044be52d8da0713e4abe227f02244193c66251408
 
@@ -371,6 +371,8 @@ python -m surreal selftest     # end-to-end smoke test
 Contributions welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md). New patches
 must come with a passing `surreal check` and must target software the
 contributor is allowed to modify.
+
+Release notes: [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Roadmap
 

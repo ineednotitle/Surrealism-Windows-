@@ -119,6 +119,42 @@ class TestApply(PatchCase):
         self.assertEqual(data["entries"][0]["bundle_id"], "org.test.patch")
 
 
+class TestWindowsLocks(PatchCase):
+    """The swap is where Windows says no: the app is running or AV holds a handle."""
+
+    def test_locked_target_gives_an_actionable_error(self):
+        import unittest.mock as mock
+
+        real_replace = os.replace
+
+        def fake_replace(src, dst):
+            if dst == self.old:
+                raise PermissionError(13, "Access is denied")
+            return real_replace(src, dst)
+
+        with mock.patch.object(patcher.os, "replace", side_effect=fake_replace):
+            with self.assertRaises(patcher.PatchError) as ctx:
+                patcher.apply_bundle(self.bundle, self.old)
+        self.assertEqual(ctx.exception.code, 5)
+        message = str(ctx.exception)
+        self.assertIn("cannot replace", message)
+        self.assertIn("close the application", message)
+        self.assertUntouched()
+
+    def test_no_temp_files_left_behind(self):
+        import unittest.mock as mock
+
+        def fake_replace(src, dst):
+            raise PermissionError(13, "Access is denied")
+
+        with mock.patch.object(patcher.os, "replace", side_effect=fake_replace):
+            with self.assertRaises(patcher.PatchError):
+                patcher.apply_bundle(self.bundle, self.old)
+        leftovers = [f for f in os.listdir(os.path.dirname(self.old))
+                     if f.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
+
 class TestGuards(PatchCase):
     def make_bundle(self, **overrides) -> Bundle:
         raw = json.loads(json.dumps(self.bundle.to_dict()))

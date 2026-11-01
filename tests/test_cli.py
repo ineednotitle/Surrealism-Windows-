@@ -393,6 +393,19 @@ class TestCli(TempDirCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(sha256_file(self.app), before)
 
+    def test_collection_apply_dry_run_writes_nothing(self):
+        pdir = self.make_collection()
+        run("init", "--accept-policy")
+        before = sha256_file(self.app)
+        code, out, err = run("collection", "apply", pdir, "--target", self.app,
+                             "--dry-run", "--json")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(len(result["report"]["applicable"]), 2)
+        self.assertEqual(sha256_file(self.app), before)
+        self.assertFalse(os.path.isdir(os.path.join(self.tmp, ".surreal")))
+
     def test_collection_apply_requires_policy(self):
         pdir = self.make_collection()
         code, _, err = run("collection", "apply", pdir, "--target", self.app, "-y")
@@ -419,6 +432,60 @@ class TestCli(TempDirCase):
         self.assertEqual(code, 3)
 
     # -- misc --------------------------------------------------------------- #
+    def test_repo_index_list_show_apply(self):
+        pdir = self.make_collection()
+        index_path = os.path.join(pdir, "surreal-repo.json")
+        code, out, err = run("repo", "index", pdir, "-o", index_path,
+                             "--name", "CLI repo", "--json")
+        self.assertEqual(code, 0, err)
+        summary = json.loads(out)["summary"]
+        self.assertEqual(summary["bundles"], 2)
+
+        code, out, err = run("repo", "list", index_path,
+                             "--target", self.app, "--json")
+        self.assertEqual(code, 0, err)
+        listed = json.loads(out)
+        self.assertEqual(len(listed["bundles"]), 2)
+        self.assertEqual(len(listed["matches"]), 2)
+
+        code, out, err = run("repo", "show", index_path, "--id", "org.cli.one")
+        self.assertEqual(code, 0, err)
+        self.assertIn("org.cli.one", out)
+
+        run("init", "--accept-policy")
+        before = sha256_file(self.app)
+        code, out, err = run("repo", "apply", index_path, "--id", "org.cli.one",
+                             "--target", self.app, "-y", "--json")
+        self.assertEqual(code, 0, err)
+        self.assertNotEqual(sha256_file(self.app), before)
+        self.assertEqual(run("revert", self.app)[0], 0)
+        self.assertEqual(sha256_file(self.app), before)
+
+    def test_repo_apply_unknown_id(self):
+        pdir = self.make_collection()
+        index_path = os.path.join(pdir, "surreal-repo.json")
+        run("repo", "index", pdir, "-o", index_path)
+        run("init", "--accept-policy")
+        code, _, err = run("repo", "apply", index_path, "--id", "org.nope",
+                           "--target", self.app, "-y")
+        self.assertEqual(code, 3)
+        self.assertIn("not in this repo", err)
+
+    def test_repo_detects_tampering(self):
+        pdir = self.make_collection()
+        index_path = os.path.join(pdir, "surreal-repo.json")
+        run("repo", "index", pdir, "-o", index_path)
+        bundle_path = os.path.join(pdir, "one.morph")
+        with open(bundle_path, "ab") as fh:
+            fh.write(b"\n")
+        run("init", "--accept-policy")
+        before = sha256_file(self.app)
+        code, _, err = run("repo", "apply", index_path, "--id", "org.cli.one",
+                           "--target", self.app, "-y")
+        self.assertEqual(code, 3)
+        self.assertIn("does not match the repo index", err)
+        self.assertEqual(sha256_file(self.app), before)
+
     def test_version_and_help(self):
         code, out, _ = run("--version")
         self.assertEqual(code, 0)
