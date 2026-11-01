@@ -197,6 +197,11 @@ class Bundle:
             raw = read_json(path)
         except json.JSONDecodeError as exc:
             raise BundleError("bundle is not valid JSON: %s" % exc) from exc
+        except UnicodeDecodeError as exc:
+            raise BundleError("bundle is not UTF-8 text (a .morph is JSON, never "
+                              "a binary): %s" % exc) from exc
+        except OSError as exc:
+            raise BundleError("cannot read bundle: %s" % exc) from exc
         if not isinstance(raw, dict):
             raise BundleError("bundle root must be a JSON object")
         b = cls.from_dict(raw, strict=strict)
@@ -235,6 +240,9 @@ class Bundle:
             if strict and set(a) - ALLOWED_ANCHOR_KEYS:
                 raise BundleError("anchor %d has unknown keys: %s"
                                   % (i, ", ".join(sorted(set(a) - ALLOWED_ANCHOR_KEYS))))
+            if not isinstance(a.get("pattern", ""), str):
+                raise BundleError("anchor %d pattern must be a hex string, not %s"
+                                  % (i, type(a.get("pattern")).__name__))
             try:
                 pattern = parse_hex_tokens(a.get("pattern", ""))
             except ValueError as exc:

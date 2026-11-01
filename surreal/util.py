@@ -28,6 +28,9 @@ def parse_hex_tokens(text: str) -> List[Optional[int]]:
     """
     if text is None:
         raise ValueError("empty byte pattern")
+    if not isinstance(text, str):
+        raise ValueError("byte patterns must be strings of hex or ascii:..., got %s"
+                         % type(text).__name__)
     raw = text.strip()
     if not raw:
         raise ValueError("empty byte pattern")
