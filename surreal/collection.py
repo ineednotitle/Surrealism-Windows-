@@ -344,6 +344,149 @@ def check_conflicts(selected: List[Entry]) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# dependency graph (whole collection, across target files)
+# --------------------------------------------------------------------------- #
+def _find_cycle(adj: Dict[str, List[str]], ids: List[str]) -> Optional[List[str]]:
+    """Return one dependency cycle as ``a -> b -> a``, or None. Iterative DFS."""
+    color = {i: 0 for i in ids}          # 0 unvisited, 1 on stack, 2 done
+    for start in ids:
+        if color[start]:
+            continue
+        color[start] = 1
+        path = [start]
+        stack = [(start, iter(adj[start]))]
+        while stack:
+            node, it = stack[-1]
+            descended = False
+            for nxt in it:
+                if color.get(nxt) == 0:
+                    color[nxt] = 1
+                    path.append(nxt)
+                    stack.append((nxt, iter(adj[nxt])))
+                    descended = True
+                    break
+                if color.get(nxt) == 1:
+                    return path[path.index(nxt):] + [nxt]
+            if not descended:
+                color[node] = 2
+                path.pop()
+                stack.pop()
+    return None
+
+
+def dependency_graph(collection: Collection,
+                     active_ids: Optional[set] = None) -> Dict[str, Any]:
+    """Structural view of the collection: nodes, edges, and what is wrong.
+
+    Works on the whole manifest, so a vault can declare that a patch for
+    ``lib/core.dll`` needs a patch for ``app.exe``. Issues are only reported for
+    *active* patches (enabled, and applicable when the caller knows that).
+    """
+    nodes: List[Dict[str, Any]] = []
+    for entry in collection.entries:
+        bundle = entry.bundle
+        nodes.append({
+            "id": bundle.id if bundle is not None else entry.bundle_file,
+            "file": entry.target or None,
+            "order": entry.order,
+            "enabled": entry.enabled,
+            "depends_on": list(entry.depends_on),
+            "conflicts_with": list(entry.conflicts_with),
+        })
+    known = {n["id"]: n for n in nodes}
+    if active_ids is None:
+        active_ids = {n["id"] for n in nodes if n["enabled"]}
+    active = {i for i in active_ids if i in known}
+
+    edges: List[Dict[str, Any]] = []
+    issues: List[Dict[str, Any]] = []
+    for node in nodes:
+        if node["id"] not in active:
+            continue
+        for dep in node["depends_on"]:
+            target = known.get(dep)
+            if target is None:
+                issues.append({"kind": "missing-dependency", "patch": node["id"],
+                               "depends_on": dep,
+                               "detail": "not defined in this collection"})
+                continue
+            cross = bool(node["file"] and target["file"]
+                         and node["file"] != target["file"])
+            edges.append({"from": node["id"], "to": dep, "cross_file": cross,
+                          "from_file": node["file"], "to_file": target["file"]})
+            if not target["enabled"]:
+                issues.append({"kind": "disabled-dependency", "patch": node["id"],
+                               "depends_on": dep,
+                               "detail": "the required patch is disabled"})
+            elif dep not in active:
+                issues.append({"kind": "inactive-dependency", "patch": node["id"],
+                               "depends_on": dep,
+                               "detail": "the required patch is not applied to "
+                                         "any target here (other or missing file?)"})
+        for other in node["conflicts_with"]:
+            if other in active:
+                # report once, on the alphabetically first of the pair
+                if node["id"] < other:
+                    issues.append({"kind": "conflict", "patch": node["id"],
+                                   "depends_on": other,
+                                   "detail": "%s and %s are both selected"
+                                             % (node["id"], other)})
+
+    cycle = _find_cycle({n["id"]: n["depends_on"] for n in nodes}, sorted(active))
+    if cycle:
+        issues.append({"kind": "cycle", "patch": cycle[0], "chain": cycle,
+                       "detail": " -> ".join(cycle)})
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "issues": issues,
+        "cross_file_edges": [e for e in edges if e["cross_file"]],
+    }
+
+
+_ISSUE_ORDER = {"cycle": 0, "missing-dependency": 1, "disabled-dependency": 2,
+                "inactive-dependency": 3, "conflict": 4, "ordering": 5}
+
+
+def validate_graph(collection: Collection,
+                   active_ids: Optional[set] = None) -> Dict[str, Any]:
+    """Raise on a broken dependency graph; return the graph when it is sound."""
+    graph = dependency_graph(collection, active_ids)
+    hard = [i for i in graph["issues"] if i["kind"] != "ordering"]
+    if hard:
+        hard.sort(key=lambda i: _ISSUE_ORDER.get(i["kind"], 9))
+        lines = []
+        for issue in hard:
+            if issue["kind"] == "cycle":
+                lines.append("dependency cycle between patches: %s" % issue["detail"])
+            elif issue["kind"] == "conflict":
+                lines.append("%s conflicts with %s" % (issue["patch"], issue["depends_on"]))
+            else:
+                lines.append("patch %s depends on %s, which is %s"
+                             % (issue["patch"], issue["depends_on"], issue["detail"]))
+        raise CollectionError(
+            "collection %r has %d dependency problem(s):\n  - %s"
+            % (collection.name, len(hard), "\n  - ".join(lines)))
+    return graph
+
+
+def _ordering_notes(graph: Dict[str, Any],
+                    file_rank: Dict[str, int]) -> List[str]:
+    """Cross-file dependencies point *backwards*: warn when one points forward."""
+    notes = []
+    for edge in graph["cross_file_edges"]:
+        before, after = file_rank.get(edge["to_file"]), file_rank.get(edge["from_file"])
+        if before is None or after is None or before <= after:
+            continue
+        notes.append(
+            "patch %s (%s) depends on %s (%s), but %s is patched after %s — "
+            "reorder the manifest so the dependency comes first"
+            % (edge["from"], edge["from_file"], edge["to"], edge["to_file"],
+               edge["to_file"], edge["from_file"]))
+    return notes
+
+
+# --------------------------------------------------------------------------- #
 # selection
 # --------------------------------------------------------------------------- #
 def matches(bundle: Bundle, target_path: str, sha: str) -> bool:
@@ -605,8 +748,14 @@ def preflight_vault(collection: Collection, root: str,
     """Dry-run every vault member on temp copies. Nothing outside the temp dir."""
     root_abs = resolve_root(collection, root)
     plan = _vault_plan(collection, root_abs)
+    selected = {e.bundle.id for _rel, _path, entries in plan for e in entries
+                if e.bundle is not None}
+    graph = validate_graph(collection, selected)
     report: Dict[str, Any] = {"vault": collection.name, "root": root_abs,
-                              "files": [], "skipped": [], "warnings": []}
+                              "files": [], "skipped": [], "warnings": [],
+                              "graph": graph}
+    report["warnings"].extend(
+        _ordering_notes(graph, {rel: i for i, (rel, _p, _e) in enumerate(plan)}))
     for rel, entries in collection.by_file():
         applicable = next(p[2] for p in plan if p[0] == rel)
         if not applicable:
@@ -680,6 +829,10 @@ def apply_vault(collection: Collection, root: str,
         raise CollectionError(
             "no patch in vault %r applies to any file under %s"
             % (collection.name, root_abs))
+    # refuse before the first byte is written: a broken graph is not something a
+    # rollback should have to hide
+    validate_graph(collection, {e.bundle.id for _rel, _path, entries in plan
+                                for e in entries if e.bundle is not None})
 
     results: List[Dict[str, Any]] = []
     touched: List[Tuple[str, str, str]] = []   # (path, backup, sha_before)

@@ -125,6 +125,42 @@ Rules:
 * Files with no matching patch (wrong build, disabled entry) are *skipped and
   reported*, not treated as failures.
 
+## Dependencies across files (v0.5)
+
+Inside one target, `depends_on` is checked when the set is selected. In a vault a
+dependency may also point at a patch for a *different* file — "the string patch
+for `app.exe` only makes sense once `lib/core.dll` has been patched" — and that is
+now checked for the whole manifest, not file by file:
+
+```json
+"patches": [
+  {"bundle": "core-strings.morph", "target": "lib/core.dll", "order": 10},
+  {"bundle": "app-nag.morph",     "target": "app.exe",      "order": 20,
+   "depends_on": ["org.you.core-strings"]}
+]
+```
+
+`collection graph <collection>` prints the graph before anything is applied:
+
+```
+  org.you.app-nag         app.exe
+      requires  org.you.core-strings
+  org.you.core-strings    lib/core.dll
+```
+
+`--json` gives `{nodes, edges, cross_file_edges, issues}` for scripts. The same
+checks run inside `collection check` and `collection apply`:
+
+* a dependency that is missing, disabled, or not applied in this run is an error
+  naming the patch — nothing is written;
+* a cycle, even across files, is refused while the manifest loads;
+* `conflicts_with` is honoured across files too (a vault used to check conflicts
+  only within one target);
+* a cross-file dependency that points *forward* (the dependency's file is patched
+  later) is reported as a warning; the loader normally topologically sorts it away.
+
+`collection check --json` includes the graph under `"graph"` so CI can assert on it.
+
 ## Safety notes
 
 * `collection check` runs the whole set against a copy in your temp directory and

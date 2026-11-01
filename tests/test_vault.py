@@ -257,5 +257,103 @@ class TestApply(VaultCase):
         self.assertEqual(sha256_file(backup), before)
 
 
+class TestDependencyGraph(VaultCase):
+    """Declared dependencies must hold *across* the vault's files, not just one."""
+
+    def test_graph_reports_cross_file_edge(self):
+        self.main_entries()
+        self.add_bundle("helper", edit(self.helper_bytes, 0x201, b"HELPER\0\0"),
+                        "sub/helper.dll", order=5)
+        entries = [dict(e) for e in self.entries]
+        entries[0]["depends_on"] = ["org.vault.helper"]
+        graph = coll.dependency_graph(self.load(entries))
+        self.assertEqual([(e["from"], e["to"]) for e in graph["edges"]],
+                         [("org.vault.main-jump", "org.vault.helper")])
+        self.assertEqual(len(graph["cross_file_edges"]), 1)
+        self.assertEqual(graph["cross_file_edges"][0]["to_file"], "sub/helper.dll")
+        self.assertEqual(graph["issues"], [])
+
+    def test_cycle_across_files_is_rejected(self):
+        self.main_entries()
+        self.add_bundle("helper", edit(self.helper_bytes, 0x201, b"HELPER\0\0"),
+                        "sub/helper.dll", order=5)
+        entries = [dict(e) for e in self.entries]
+        entries[0]["depends_on"] = ["org.vault.helper"]
+        entries[2]["depends_on"] = ["org.vault.main-jump"]
+        with self.assertRaises(coll.CollectionError) as ctx:
+            self.load(entries)          # the loader refuses to order a cycle
+        self.assertIn("dependency cycle", str(ctx.exception))
+        # and the graph view finds the same cycle on its own
+        self.assertEqual(coll._find_cycle({"a": ["b"], "b": ["a"]}, ["a", "b"]),
+                         ["a", "b", "a"])
+
+    def test_missing_dependency_is_caught_while_loading(self):
+        self.main_entries()
+        entries = [dict(e) for e in self.entries]
+        entries[0]["depends_on"] = ["org.vault.nope"]
+        with self.assertRaises(coll.CollectionError) as ctx:
+            self.load(entries)
+        self.assertIn("org.vault.nope", str(ctx.exception))
+        self.assertIn("not in this collection", str(ctx.exception))
+
+    def test_disabled_dependency_fails_preflight(self):
+        # main-jump needs the helper patch, but the helper patch is switched off
+        self.main_entries()
+        self.add_bundle("helper", edit(self.helper_bytes, 0x201, b"HELPER\0\0"),
+                        "sub/helper.dll", order=99)
+        c = self.load()
+        c.entries[0].depends_on = ["org.vault.helper"]
+        for entry in c.entries:
+            if entry.target == "sub/helper.dll":
+                entry.enabled = False
+        graph = coll.dependency_graph(c)
+        self.assertEqual([i["kind"] for i in graph["issues"]],
+                         ["disabled-dependency"])
+        before = sha256_file(self.main)
+        with self.assertRaises(coll.CollectionError) as ctx:
+            coll.preflight_vault(c, self.root)
+        self.assertIn("org.vault.helper", str(ctx.exception))
+        self.assertIn("disabled", str(ctx.exception))
+        self.assertEqual(sha256_file(self.main), before)
+
+    def test_conflict_within_a_file_is_rejected_in_vault_mode(self):
+        self.main_entries()
+        entries = [dict(self.entries[0]), dict(self.entries[1])]
+        entries[0]["conflicts_with"] = ["org.vault.main-nag"]
+        c = self.load(entries)
+        with self.assertRaises(coll.CollectionError) as ctx:
+            coll.preflight_vault(c, self.root)
+        self.assertIn("conflicts with", str(ctx.exception))
+
+    def test_forward_cross_file_dependency_warns_but_runs(self):
+        # load_collection topologically sorts, so this can only happen when a
+        # Collection is built by hand: main.exe depends on a patch for the helper,
+        # yet main.exe is patched first. It still works (different files) but the
+        # user is told the order is odd.
+        self.main_entries()
+        self.add_bundle("helper", edit(self.helper_bytes, 0x201, b"HELPER\0\0"),
+                        "sub/helper.dll", order=99)
+        c = self.load()
+        c.entries[0].depends_on = ["org.vault.helper"]
+        # force main.exe first in manifest order without touching the loader
+        c.entries.sort(key=lambda e: 0 if e.target == "main.exe" else 1)
+        self.assertEqual([rel for rel, _entries in c.by_file()],
+                         ["main.exe", "sub/helper.dll"])
+        report = coll.preflight_vault(c, self.root)
+        self.assertEqual([f["file"] for f in report["files"]],
+                         ["main.exe", "sub/helper.dll"])
+        self.assertTrue(any("patched after" in w for w in report["warnings"]))
+        validate = coll.validate_graph(c, {e.bundle.id for e in c.entries})
+        self.assertEqual(validate["issues"], [])
+        result = coll.apply_vault(c, self.root)
+        self.assertEqual([f["file"] for f in result["files"]],
+                         ["main.exe", "sub/helper.dll"])
+
+    def test_graph_is_serialisable(self):
+        self.main_entries()
+        c = self.load()
+        json.dumps(coll.dependency_graph(c))
+
+
 if __name__ == "__main__":
     unittest.main()

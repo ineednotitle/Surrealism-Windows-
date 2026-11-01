@@ -772,6 +772,37 @@ def cmd_collection(args, console: Console) -> int:
                        "<app directory>" if coll.is_vault else "app.exe"))
         return EXIT_OK
 
+    if args.action == "graph":
+        graph = collections.dependency_graph(coll)
+        if console.json_mode:
+            console.emit_json({"ok": True, "collection": coll.name,
+                               "manifest": coll.path, "graph": graph})
+            return EXIT_OK
+        console.head(BANNER)
+        console.kv("collection", coll.name)
+        console.kv("patches", len(graph["nodes"]))
+        if graph["cross_file_edges"]:
+            console.kv("cross-file edges", len(graph["cross_file_edges"]))
+        console.say("")
+        for node in graph["nodes"]:
+            where = node["file"] or "(single target)"
+            console.say("  %-40s %s" % (node["id"], where))
+            for dep in node["depends_on"]:
+                console.say("      requires  %s" % dep)
+            for other in node["conflicts_with"]:
+                console.say("      conflicts %s" % other)
+            if not node["enabled"]:
+                console.say("      (disabled)")
+        if graph["issues"]:
+            console.say("")
+            for issue in graph["issues"]:
+                console.warn("%s: %s" % (issue["kind"], issue.get("detail", "")))
+        console.say("")
+        console.say("  next: surreal collection check %s --target %s"
+                    % (os.path.basename(os.path.dirname(coll.path) or "."),
+                       "<app directory>" if coll.is_vault else "app.exe"))
+        return EXIT_OK
+
     # check / apply need a target
     target = args.target
     if not target:
@@ -1445,7 +1476,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_verify)
 
     sp = add("collection", "list/check/apply a set of bundles as one transaction")
-    sp.add_argument("action", choices=["list", "check", "apply"])
+    sp.add_argument("action", choices=["list", "graph", "check", "apply"])
     sp.add_argument("path", help="collection directory or manifest file")
     sp.add_argument("--target", help="binary to patch (check/apply)")
     sp.add_argument("--yes", "-y", action="store_true")

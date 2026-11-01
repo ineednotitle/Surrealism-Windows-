@@ -210,6 +210,8 @@ def main() -> int:
             json.dump({"format": "surreal.collection", "format_version": 1,
                        "name": "ci set",
                        "patches": [{"bundle": "main.morph", "order": 10}]}, fh)
+        run("collection", "graph", patches)
+        run("collection", "graph", patches, "--json")
         run("collection", "check", patches, "--target", state["app"])
         run("collection", "apply", patches, "--target", state["app"], "-y")
         run("revert", state["app"])

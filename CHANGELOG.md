@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Collections across files
+* Vault collections validate the dependency graph of the *whole* manifest, not one
+  target at a time: cross-file `depends_on` is honoured, disabled/absent
+  dependencies block the run, conflicts are caught across files, and cycles are
+  refused before any byte is written.
+* New `surreal collection graph <collection> [--json]` shows patches, their target
+  file, requirements and conflicts; `collection check --json` now embeds the same
+  graph.
+
 All notable changes to **Surrealism Window** (`surreal`). Bundle format version is
 `surreal.morph` v1 throughout; every release is additive within that format, so a
 bundle written for an older version keeps loading.
