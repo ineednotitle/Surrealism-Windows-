@@ -340,8 +340,16 @@ python tools/smoke_real_binary.py "C:\Program Files\Notepad++\notepad++.exe"
 ```
 
 Your file is never modified — only the copy — and a failing step leaves the temp
-directory behind with the work-in-progress files. The same script is what CI runs
-against the generated demo PE.
+directory behind with the work-in-progress files.
+
+CI runs `tools/ci_smoke.py`, which drives the same pipelines end to end on
+generated fixtures (demo → diff → sign → apply → revert, overlay growth, header
+surgery, a multi-file vault, a local repo and the interactive menu) and prints one
+`PASS`/`FAIL` line per scenario — handy on your own machine too:
+
+```bash
+python tools/ci_smoke.py
+```
 
 ## Low-end by design (4 GB RAM, 2 cores, HDD)
 
