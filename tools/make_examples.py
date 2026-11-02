@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from surreal import repo  # noqa: E402
 from surreal import surgery  # noqa: E402
 from surreal.diffgen import build_bundle  # noqa: E402
+from surreal.patchfile import Bundle  # noqa: E402
 from surreal.pe import PE  # noqa: E402
 from surreal.testkit import make_pe_pair, sample_app  # noqa: E402
 
@@ -135,6 +136,32 @@ def main() -> int:
               % (out4, len(sb.hunks),
                  os.path.getsize(grown_section) - os.path.getsize(old),
                  sb.hunks[0].section, sb.hunks[0].virtual_size_after or 0))
+
+        # a conditioned bundle: the patch declares the build it expects and makes
+        # one hunk conditional, so it can be applied to a range of demo builds
+        conditioned_path = os.path.join(EXAMPLES, "demo-shorten-nag.morph")
+        conditioned = Bundle.load(conditioned_path)
+        conditioned.id = "org.surreal.demo.conditional-nag"
+        conditioned.name = "Demo: shorten the nag only where it still exists"
+        conditioned.description = (
+            "Same edit as demo-shorten-nag, but it refuses anything that is not a "
+            "64-bit image with a .rdata section, and it skips the string hunk when "
+            "the trial text is not in the build. This is what a .morph can do "
+            "without any scripting runtime: declarative conditions, no code.")
+        conditioned.requires = [
+            {"machine": "x64", "comment": "authored against a 64-bit build"},
+            {"section": ".rdata"},
+            {"string": "Version 1.0.0", "comment": "the demo banner must be there"},
+        ]
+        # the string-blanking hunk only applies while the nag text is still there
+        for hunk in conditioned.hunks:
+            if hunk.op == "patch" and hunk.length > 8:
+                hunk.when = {"string": "Trial expired."}
+        out5 = os.path.join(EXAMPLES, "demo-conditional.morph")
+        conditioned.save(out5)
+        print("wrote %s (%d preconditions, %d conditional hunk(s))"
+              % (out5, len(conditioned.requires),
+                 sum(1 for h in conditioned.hunks if h.when)))
 
         # a collection applying two size-preserving bundles in one transaction
         manifest = {

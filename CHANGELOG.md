@@ -4,6 +4,27 @@ All notable changes to **Surrealism Window** (`surreal`). Bundle format version 
 `surreal.morph` v1 throughout; every release is additive within that format, so a
 bundle written for an older version keeps loading.
 
+## Unreleased — conditions, easy mode, doctor, undo
+
+### Conditional patches (declarative, no code execution)
+* A bundle may declare `requires` — all of which must hold, or the patch is
+  refused before anything is written (exit 3, message explains which condition
+  failed) — and any hunk may carry `when`, which skips just that hunk with a note.
+* Condition vocabulary: `all`/`any`/`not`, `machine`, `is_dotnet`, `is_dll`,
+  `has_overlay`, `has_signature`, `section`, `section_is_executable`, `string`,
+  `utf16`, `pattern` (with `??` wildcards), `size_at_least`, `size_at_most`, each
+  with an optional `comment`.
+* Bounded by design: max 32 nodes, 64 list entries, 4096-character needles, fixed
+  nesting depth — a hostile bundle cannot make `check` expensive. Non-PE (raw
+  offset) targets fail closed rather than skip a condition they cannot prove.
+* If every hunk is skipped by its own condition the patch errors
+  ("none of N hunk(s) apply to this build") instead of silently doing nothing.
+* `surreal diff` can author them: `--requires-machine`, `--requires-section NAME`,
+  `--requires-string TEXT`. `surreal info` lists them; `check --json` returns
+  `plan.requires` and `plan.skipped_hunks`.
+* New example `examples/demo-conditional.morph` and doc
+  [`docs/CONDITIONS.md`](docs/CONDITIONS.md); 47 new tests, 1 new CI scenario.
+
 ## Unreleased — easy mode, doctor, undo
 
 ### A guided front end

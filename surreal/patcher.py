@@ -65,6 +65,8 @@ class Plan:
     signature: Optional[Dict[str, Any]] = None
     relocs: List[Dict[str, Any]] = field(default_factory=list)
     checksum_applicable: bool = True
+    requires: List[Dict[str, Any]] = field(default_factory=list)
+    skipped_hunks: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -83,6 +85,8 @@ class Plan:
             "new_checksum": self.new_checksum,
             "signature": self.signature,
             "relocations": self.relocs,
+            "requires": self.requires,
+            "skipped_hunks": self.skipped_hunks,
             "notes": self.notes,
             "warnings": self.warnings,
         }
@@ -332,6 +336,24 @@ def build_plan(bundle: Bundle, target_path: str, accept_drift: bool = False,
                 "target carries an Authenticode signature — patching invalidates it "
                 "(Windows SmartScreen may warn afterwards)")
 
+        # declarative preconditions: refuse loudly instead of patching a build the
+        # author never saw (this is the whole point of a .morph being data)
+        if bundle.requires:
+            from . import script as scriptmod
+
+            results = scriptmod.check(bundle.requires, pe.data, pe)
+            plan.requires = results
+            failed = scriptmod.first_failure(results)
+            if failed is not None:
+                raise PatchError(
+                    "this patch does not fit this build: %s (needs %s)\n"
+                    "  Every condition is listed in `surreal info <bundle>` and "
+                    "re-checked by `surreal check`."
+                    % (failed["detail"], failed["condition"]), code=3)
+            for item in results:
+                plan.notes.append("requires: %s - %s"
+                                  % (item["condition"], item["detail"]))
+
         anchor_offsets: Dict[int, int] = {}
         for i in range(len(bundle.anchors)):
             anchor_offsets[i] = resolve_anchor(bundle, i, pe)
@@ -342,10 +364,30 @@ def build_plan(bundle: Bundle, target_path: str, accept_drift: bool = False,
             if not hunk.enabled:
                 plan.notes.append("hunk %d disabled, skipped" % idx)
                 continue
+            if hunk.when:
+                from . import script as scriptmod
+
+                ok, detail = scriptmod.evaluate(hunk.when, scriptmod._View(pe.data, pe))
+                if not ok:
+                    plan.skipped_hunks.append({"index": idx,
+                                               "condition": scriptmod._describe(hunk.when),
+                                               "detail": detail})
+                    plan.notes.append("hunk %d skipped: %s (%s)"
+                                      % (idx, scriptmod._describe(hunk.when), detail))
+                    continue
             if hunk.op in ("extend-section", "add-section"):
                 plan.resolved.append(resolve_surgery_hunk(hunk, idx, pe, plan))
                 continue
             plan.resolved.append(resolve_hunk(bundle, hunk, idx, pe, anchor_offsets))
+
+        if not plan.resolved and plan.skipped_hunks:
+            raise PatchError(
+                "none of %d hunk(s) apply to this build: %s\n"
+                "  The bundle's conditional hunks did not match — this is usually a "
+                "different version of the program."
+                % (len(bundle.hunks),
+                   "; ".join("hunk %d needs %s" % (h["index"], h["condition"])
+                             for h in plan.skipped_hunks)), code=3)
 
         _check_size_ops(plan, accept_drift)
         _check_overlaps([r for r in plan.resolved if r.op == "patch"],
@@ -394,6 +436,20 @@ def _build_raw_plan(bundle: Bundle, target_path: str, sha: str,
                     ) -> Plan:
     size = os.path.getsize(target_path)
     plan = Plan(target=os.path.abspath(target_path), original_sha256=sha)
+    if bundle.requires:
+        # no PE here, so anything that needs image structure simply cannot hold —
+        # fail closed instead of pretending the condition passed
+        from . import script as scriptmod
+
+        with open(target_path, "rb") as fh:
+            data = fh.read()
+        results = scriptmod.check(bundle.requires, data, None)
+        plan.requires = results
+        failed = scriptmod.first_failure(results)
+        if failed is not None:
+            raise PatchError(
+                "this patch does not fit this build: %s (needs %s)"
+                % (failed["detail"], failed["condition"]), code=3)
     sig = check_signature(bundle, require=require_signature, config_dir=config_dir,
                           extra_trusted=extra_trusted)
     plan.signature = sig

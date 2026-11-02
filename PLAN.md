@@ -387,6 +387,21 @@ Not done, and deliberately so: moving an existing section, inserting a section
 in the middle, rewriting relocations, or changing the entry point. Those need a
 real linker and are the point where a byte-patcher should stop pretending.
 
+### M3+ (shipped after v0.5) — conditional patches, no scripting runtime
+
+The roadmap item was "optional patch scripting (sandboxed, no shell)". Shipped as
+*declarative conditions* instead of an interpreter: `requires` (bundle-level
+preconditions) and `when` (per-hunk), evaluated by a small bounded evaluator over
+the already-parsed image (`surreal/script.py`). This buys the useful half of
+scripting — "apply only where this text still exists", "refuse 32-bit builds" —
+while keeping a downloaded `.morph` incapable of executing anything, and keeping it
+inside the bundle signature. See `docs/CONDITIONS.md`.
+
+An interpreter (even a "sandboxed" one) would need auditing on every release, would
+make patch bundles unreviewable, and would not fit the 4 GB / no-runtime target.
+Conditions are the compromise; the design rules are written down so the next person
+does not have to rediscover them.
+
 ### M3 (shipped in v0.5) — multi-file vaults
 
 A collection whose patch entries each carry a relative `target` path becomes a
@@ -444,7 +459,8 @@ data, a local repo index, an interactive picker, and a Windows frozen build that
 survives its own smoke test. 294 tests plus 17 selftest steps and 11 CI scenarios
 run on Windows, macOS and Linux.
 
-Deliberately not shipped: patch scripting (a `.morph` stays data), mid-image
+Deliberately not shipped: an executable patch-scripting runtime (a `.morph` stays
+data — conditions cover the useful subset, see `docs/CONDITIONS.md`), mid-image
 section moves, relocation rewriting, and anything that touches running processes.
 Those need a linker, a debugger or a sandbox, and shipping half of one is how
 patchers corrupt binaries.

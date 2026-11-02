@@ -51,6 +51,29 @@
       "policy_blocked": null
     },
     {
+      "id": "org.surreal.demo.conditional-nag",
+      "name": "Demo: shorten the nag only where it still exists",
+      "file": "demo-conditional.morph",
+      "bundle_sha256": "53c5110c87085562808c9daa5b75e2ed6cedf36b68b285e0d3c635157b2aed33",
+      "version": "1.0.0",
+      "author": "surreal demo",
+      "description": "Same edit as demo-shorten-nag, but it refuses anything that is not a 64-bit image with a .rdata section, and it skips the string hunk when the trial text is not in the build. This is what a .morph can do without any scripting runtime: declarative conditions, no code.",
+      "license": "",
+      "homepage": "",
+      "hunks": 2,
+      "ops": [
+        "patch"
+      ],
+      "target": {
+        "filename": "demo_app.exe",
+        "size": 2048,
+        "sha256": "4d51cec411ac4bf2856d007044be52d8da0713e4abe227f02244193c66251408"
+      },
+      "signer": "",
+      "public_key": null,
+      "policy_blocked": null
+    },
+    {
       "id": "org.surreal.demo.extend-section",
       "name": "Demo: grow the last section",
       "file": "demo-extend-section.morph",

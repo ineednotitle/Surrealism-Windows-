@@ -139,6 +139,7 @@ $ python -m surreal check surreal-demo/demo-shorten-nag.morph `
 | `scan <exe> --string "text" [--both]` | ASCII and/or UTF-16LE text search |
 | `diff old new -o x.morph --id …` | builds a patch bundle from two builds (this is the "patch creator") |
 | `info <morph>` | human + `--json` view of a bundle: anchors, hunks, policy flags |
+| `requires` / `when` in a bundle | declarative preconditions ("this build only") and per-hunk conditions ("only if that text is still there") — see [`docs/CONDITIONS.md`](docs/CONDITIONS.md) |
 | `check <morph> --target <exe>` | full preflight, writes nothing, exit code tells you if it would work |
 | `apply <morph> --target <exe>` | lock → backup → verify → patch a copy → recompute checksum → atomic swap → journal |
 | `revert <exe>` | restore the last backup (`--list` shows the journal) |
@@ -199,6 +200,25 @@ Result (trimmed):
 ```
 
 Full normative spec: [`docs/PATCH_FORMAT.md`](docs/PATCH_FORMAT.md).
+
+## Making a patch build-tolerant (no scripting engine)
+
+A patch that only works on one exact hash is brittle; a patch that runs arbitrary
+code is a security hole. `surreal` takes the middle road: a bundle can state
+**conditions**, which are data:
+
+```json
+"requires": [{"machine": "x64"}, {"section": ".rdata"}],
+"hunks": [{"offset": 1097, "expect": "54 72 69 61 6C", "replace": "00 …",
+           "when": {"string": "Trial expired."}}]
+```
+
+`requires` is checked before a byte is written (a failed one is a refusal with a
+reason, exit 3, nothing touched). `when` skips a single hunk and says so. Both are
+covered by the bundle's signature; there is no `eval`, no shell and no plugin
+anywhere in the tool. Author them with
+`surreal diff … --requires-machine --requires-section .rdata` or by hand —
+vocabulary and design rules in [`docs/CONDITIONS.md`](docs/CONDITIONS.md).
 
 ## How a patch is applied (the safety model)
 

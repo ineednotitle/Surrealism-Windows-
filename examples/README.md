@@ -27,6 +27,25 @@ each hunk carries an `anchor`, a corroborating `section`+`rva`, a raw `offset`,
 the exact `expect` bytes and the `replace` bytes: four independent witnesses to
 the same edit, all of which must agree.
 
+## `demo-conditional.morph`
+
+The same two edits as `demo-shorten-nag.morph`, but written as a *build-tolerant*
+patch: three `requires` conditions (`machine = x64`, `.rdata` present, the demo
+banner text present) and a `when` on the string hunk (`only if "Trial expired." is
+still there`). Apply it to the demo app and it behaves like the plain bundle; apply
+it to a build that lacks the banner and it refuses with a reason instead of writing
+half a patch.
+
+```bash
+python -m surreal info  examples/demo-conditional.morph     # shows the preconditions
+python -m surreal check examples/demo-conditional.morph --target /tmp/demo/demo_app.exe --json
+```
+
+The vocabulary and the safety rules are in
+[`docs/CONDITIONS.md`](../docs/CONDITIONS.md). This is the whole of "patch
+scripting" in Surrealism Window: conditions are data, and nothing downloaded can
+execute.
+
 ## `demo-append-overlay.morph`
 
 A size-changing bundle: it appends 88 bytes of overlay after the last section

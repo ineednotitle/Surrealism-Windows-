@@ -17,11 +17,11 @@ from .util import format_hex, parse_hex_bytes, parse_hex_tokens, read_json, writ
 ALLOWED_KEYS = {
     "format", "format_version", "id", "name", "version", "description", "notes",
     "created_utc", "author", "homepage", "license", "tool", "target", "anchors",
-    "hunks", "policy", "signature",
+    "hunks", "policy", "signature", "requires",
 }
 ALLOWED_TARGET_KEYS = {"filename", "size", "sha256", "pe", "authenticode", "sections"}
 ALLOWED_HUNK_KEYS = {"op", "anchor", "delta", "section", "rva", "offset",
-                     "expect", "replace", "comment", "enabled",
+                     "expect", "replace", "comment", "enabled", "when",
                      "raw_size_before", "virtual_size_after", "characteristics",
                      "name"}
 HUNK_OPS = {"patch", "append", "truncate", "extend-section", "add-section"}
@@ -56,6 +56,7 @@ class Hunk:
     virtual_size_after: Optional[int] = None
     characteristics: Optional[int] = None
     name: Optional[str] = None
+    when: Optional[Dict[str, Any]] = None
 
     @property
     def length(self) -> int:
@@ -90,6 +91,8 @@ class Hunk:
             out["comment"] = self.comment
         if not self.enabled:
             out["enabled"] = False
+        if self.when:
+            out["when"] = self.when
         return out
 
 
@@ -148,6 +151,7 @@ class Bundle:
     created_utc: str = ""
     tool: Dict[str, str] = field(default_factory=dict)
     policy: Policy = field(default_factory=Policy)
+    requires: List[Dict[str, Any]] = field(default_factory=list)
     signature: Optional[Dict[str, Any]] = None
     path: Optional[str] = None
     strict: bool = True
@@ -180,6 +184,8 @@ class Bundle:
             out["anchors"] = [a.to_dict() for a in self.anchors]
         out["hunks"] = [h.to_dict() for h in self.hunks]
         out["policy"] = self.policy.to_dict()
+        if self.requires:
+            out["requires"] = self.requires
         if self.signature:
             out["signature"] = self.signature
         return out
@@ -348,9 +354,12 @@ class Bundle:
                 offset=_opt_int(h.get("offset")),
                 comment=str(h.get("comment") or ""),
                 enabled=bool(h.get("enabled", True)),
+                when=_parse_condition(h.get("when"), "hunk %d when" % i),
             ))
         if not hunks:
             raise BundleError("bundle contains no hunks — nothing to do")
+
+        requires = _parse_conditions(raw.get("requires"), "requires")
 
         pol_raw = raw.get("policy") or {}
         policy = Policy(
@@ -373,6 +382,7 @@ class Bundle:
             license=str(raw.get("license") or ""),
             created_utc=str(raw.get("created_utc") or ""),
             tool=raw.get("tool") or {},
+            requires=requires,
             policy=policy,
             signature=raw.get("signature"),
             strict=strict,
@@ -403,6 +413,27 @@ class Bundle:
         return "%s (%s) — %d hunk(s), target %s" % (
             self.name, self.id, len([h for h in self.hunks if h.enabled]),
             self.target.get("filename") or self.target.get("sha256", "?")[:12])
+
+
+def _parse_condition(value, where: str):
+    """Validate one declarative condition (see ``surreal/script.py``)."""
+    if value is None:
+        return None
+    from . import script
+
+    try:
+        return script.validate(value, where)
+    except script.ScriptError as exc:
+        raise BundleError(str(exc)) from exc
+
+
+def _parse_conditions(value, where: str):
+    from . import script
+
+    try:
+        return script.validate_all(value, where)
+    except script.ScriptError as exc:
+        raise BundleError(str(exc)) from exc
 
 
 def _parse_characteristics(v) -> Optional[int]:

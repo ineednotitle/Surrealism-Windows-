@@ -269,6 +269,43 @@ def main() -> int:
         run("revert", state["app"])
         return "indexed, resolved by id, applied and reverted"
 
+    @scenario("conditional bundle")
+    def _conditions():
+        # the example bundle declares machine/section/text preconditions and one
+        # conditional hunk; it must apply to the demo app it was authored for
+        source = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "examples", "demo-conditional.morph")
+        if not os.path.isfile(source):
+            raise AssertionError("examples/demo-conditional.morph is missing")
+        conddir = os.path.join(work, "cond")
+        os.makedirs(conddir, exist_ok=True)
+        cond = os.path.join(conddir, "conditional.morph")
+        shutil.copyfile(source, cond)
+        run("info", cond)
+        code, out, _err = run("check", cond, "--target", state["app"], "--json")
+        plan = json.loads(out)["plan"]
+        if not all(item["holds"] for item in plan["requires"]):
+            raise AssertionError("a precondition failed on the build it was made for")
+        run("apply", cond, "--target", state["app"], "-y")
+        run("revert", state["app"])
+
+        # now break a precondition: the bundle must refuse, not patch
+        broken = os.path.join(conddir, "impossible.morph")
+        with open(source, "r", encoding="utf-8") as fh:
+            bundle = json.load(fh)
+        bundle["requires"] = [{"string": "text-that-is-not-in-this-file"}]
+        with open(broken, "w", encoding="utf-8") as fh:
+            json.dump(bundle, fh)
+        before = sha256_file(state["app"])
+        code, _out, err = run("check", broken, "--target", state["app"], expect=3)
+        if "does not fit this build" not in err:
+            raise AssertionError("refusal did not explain itself: %s" % err)
+        code, _out, err = run("apply", broken, "--target", state["app"], "-y",
+                              expect=3)
+        if sha256_file(state["app"]) != before:
+            raise AssertionError("a refused bundle changed the file")
+        return "preconditions enforced on apply; conditional hunk resolved"
+
     @scenario("easy mode (dragged file)")
     def _easy():
         import builtins

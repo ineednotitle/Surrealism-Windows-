@@ -324,6 +324,7 @@ def cmd_diff(args, console: Console) -> int:
         )
     except diffgen.DiffError as exc:
         return _die(console, str(exc), EXIT_MISMATCH)
+    bundle.requires = _author_requires(args, console)
     bundle.save(args.output)
 
     if console.json_mode:
@@ -342,6 +343,11 @@ def cmd_diff(args, console: Console) -> int:
     if stats.get("size_delta"):
         console.kv("size delta", "%+d bytes (overlay)" % stats["size_delta"])
     console.kv("target sha256", bundle.target.get("sha256", ""))
+    if bundle.requires:
+        console.kv("preconditions", "%d (a target that fails one is refused)"
+                   % len(bundle.requires))
+        for cond in bundle.requires:
+            console.say("    - %s" % _describe_condition(cond))
     for warn in stats["warnings"]:
         console.warn(warn)
     console.say("")
@@ -359,6 +365,39 @@ def _hunk_amount(h) -> str:
     if h.op in ("extend-section", "add-section"):
         return "+%d bytes (padded to FileAlignment)" % len(h.replace)
     return "%d bytes" % h.length
+
+
+def _describe_condition(cond: Dict[str, Any]) -> str:
+    from . import script
+
+    return script._describe(cond)
+
+
+def _author_requires(args, console: Console) -> List[Dict[str, Any]]:
+    """Turn --requires-* flags into conditions, using the *original* build."""
+    from . import script as scriptmod
+
+    conds: List[Dict[str, Any]] = []
+    if getattr(args, "requires_machine", False):
+        try:
+            with PE.open(args.old) as image:
+                machine = image.machine_name
+        except (PEError, OSError) as exc:
+            console.warn("cannot read the machine type: %s" % exc)
+            machine = ""
+        for known, aliases in scriptmod.MACHINES.items():
+            if machine.lower() in aliases:
+                conds.append({"machine": known,
+                              "comment": "authored against %s" % machine})
+                break
+        else:
+            console.warn("unknown machine type %r - no machine precondition"
+                         % machine)
+    for name in getattr(args, "requires_section", []) or []:
+        conds.append({"section": name})
+    for text in getattr(args, "requires_string", []) or []:
+        conds.append({"string": text})
+    return conds
 
 
 def cmd_info(args, console: Console) -> int:
@@ -383,6 +422,12 @@ def cmd_info(args, console: Console) -> int:
                % (bundle.target.get("filename", "?"),
                   human_size(int(bundle.target.get("size", 0) or 0)),
                   (bundle.target.get("sha256") or "")[:16]))
+    if bundle.requires:
+        console.head("  preconditions (%d)" % len(bundle.requires))
+        for cond in bundle.requires:
+            console.say("    - %s" % _describe_condition(cond))
+            if cond.get("comment"):
+                console.say("        %s" % cond["comment"])
     console.say("")
     console.head("  anchors (%d)" % len(bundle.anchors))
     for i, a in enumerate(bundle.anchors):
@@ -408,6 +453,8 @@ def cmd_info(args, console: Console) -> int:
         console.say("    [%d] %-46s %s%s"
                     % (i, ", ".join(where) or "unlocated",
                        _hunk_amount(h), "" if h.enabled else "   (disabled)"))
+        if h.when:
+            console.say("        only if %s" % _describe_condition(h.when))
         if h.expect:
             console.say("        - %s" % " ".join(
                 "%02X" % v if v is not None else "??" for v in h.expect)[:100])
@@ -1455,6 +1502,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--merge-gap", type=int, default=16,
                     help="merge differences closer than N bytes (default 16)")
     sp.add_argument("--force", action="store_true", help="allow non-PE input")
+    sp.add_argument("--requires-machine", action="store_true",
+                    help="record the build's machine type as a precondition")
+    sp.add_argument("--requires-section", action="append", metavar="NAME",
+                    default=[], help="require this section to exist (repeatable)")
+    sp.add_argument("--requires-string", action="append", metavar="TEXT",
+                    default=[], help="require this text in the target (repeatable)")
     sp.set_defaults(func=cmd_diff)
 
     sp = add("info", "inspect a .morph bundle")
