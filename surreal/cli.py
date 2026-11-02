@@ -1501,8 +1501,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Surrealism Window — inspect, diff and patch Windows PE "
                     "executables you are authorised to modify.",
         epilog=textwrap.dedent("""\
+            start here:  surreal easy app.exe   (or just drop the .exe on surreal.exe)
+                         surreal doctor app.exe  "why won't this patch apply?"
+                         surreal undo app.exe    put the original back
             exit codes: 0 ok · 2 usage · 3 mismatch/unresolved · 4 policy · 5 IO
             docs: PLAN.md (design) · docs/PATCH_FORMAT.md (bundle spec) ·
+                  docs/CONDITIONS.md (patch conditions) ·
                   docs/LEGAL.md (what is in scope)
             """),
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1522,6 +1526,24 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--max-mem", type=float, default=argparse.SUPPRESS, metavar="MB",
                         help="memory ceiling in MB (default 256)")
         return sp
+
+    sp = add("easy", "guided mode: pick a program, see your patches, apply safely")
+    sp.add_argument("what", nargs="?", default="",
+                    help="the .exe (or folder) to patch — dropped files welcome")
+    sp.add_argument("--patch", action="append", metavar="FILE", default=[],
+                    help="use this .morph file (repeatable)")
+    sp.add_argument("--dir", action="append", metavar="DIR", default=[],
+                    help="also look for .morph files here (repeatable)")
+    sp.add_argument("--yes", "-y", action="store_true",
+                    help="assume yes: apply every applicable patch")
+    sp.set_defaults(func=cmd_easy)
+
+    sp = add("doctor", "check that this machine, file and patches will work")
+    sp.add_argument("what", nargs="?", default="",
+                    help="the .exe (or folder) you are about to patch")
+    sp.add_argument("--patch", action="append", metavar="FILE", default=[])
+    sp.add_argument("--dir", action="append", metavar="DIR", default=[])
+    sp.set_defaults(func=cmd_doctor)
 
     sp = add("init", "read the usage policy and record your acknowledgement")
     sp.add_argument("--accept-policy", action="store_true")
@@ -1691,24 +1713,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("demo", "write a synthetic demo app + patch bundle to a directory")
     sp.add_argument("--out", default="surreal-demo", help="output directory")
     sp.set_defaults(func=cmd_demo)
-
-    sp = add("easy", "guided mode: pick a program, see your patches, apply safely")
-    sp.add_argument("what", nargs="?", default="",
-                    help="the .exe (or folder) to patch — dropped files welcome")
-    sp.add_argument("--patch", action="append", metavar="FILE", default=[],
-                    help="use this .morph file (repeatable)")
-    sp.add_argument("--dir", action="append", metavar="DIR", default=[],
-                    help="also look for .morph files here (repeatable)")
-    sp.add_argument("--yes", "-y", action="store_true",
-                    help="assume yes: apply every applicable patch")
-    sp.set_defaults(func=cmd_easy)
-
-    sp = add("doctor", "check that this machine, file and patches will work")
-    sp.add_argument("what", nargs="?", default="",
-                    help="the .exe (or folder) you are about to patch")
-    sp.add_argument("--patch", action="append", metavar="FILE", default=[])
-    sp.add_argument("--dir", action="append", metavar="DIR", default=[])
-    sp.set_defaults(func=cmd_doctor)
 
     sp = add("history", "list every recorded state of a file and its backup")
     sp.add_argument("target")
