@@ -4,6 +4,22 @@ All notable changes to **Surrealism Window** (`surreal`). Bundle format version 
 `surreal.morph` v1 throughout; every release is additive within that format, so a
 bundle written for an older version keeps loading.
 
+## Unreleased — history and restore
+
+* `surreal history <exe>` lists every recorded state of a file, newest first: when,
+  which bundle (or patch set), the resulting hash, and whether the backup still
+  exists and still hashes to the recorded original. `--json` for scripts.
+* `surreal restore <exe> [--from N]` puts back a *specific* state — the recovery
+  path when `undo` is not enough or the file was edited since. It verifies the
+  backup against the recorded hash, verifies the staged copy before the atomic
+  swap, refuses to overwrite a file that changed unless `--force`, and records
+  itself in the journal.
+* `undo` now recognises "the file already has its original bytes" and treats it as
+  success with an explanation, instead of a scary mismatch.
+* `doctor` points at `history` when a file has more than one recorded change.
+* 17 new tests and one new CI scenario (15 total); the frozen-exe smoke also runs
+  `history` and `restore`.
+
 ## v0.6.1 — packaging
 
 * The Windows build publishes the frozen binary's size and SHA-256 again: a

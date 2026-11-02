@@ -840,6 +840,148 @@ def _write_checksum(fh, checksum: int) -> None:
 # --------------------------------------------------------------------------- #
 # reverting
 # --------------------------------------------------------------------------- #
+RESTORABLE_ACTIONS = ("apply", "apply-collection", "apply-vault")
+
+
+def history(target_path: str) -> List[Dict[str, Any]]:
+    """Every recorded state of this file, newest first, as a user can act on it.
+
+    One journal covers a whole directory, so entries are filtered by target: a
+    vault writes one entry per file into the same journal.
+
+    Each item carries ``index`` (1 = newest, what ``restore --from`` takes),
+    the journal fields, ``backup_exists`` and - when the backup is readable -
+    ``backup_matches`` (does its hash still equal the recorded pre-patch state?).
+    """
+    from .journal import Journal
+
+    journal = Journal(target_path)
+    target = os.path.abspath(target_path)
+    items: List[Dict[str, Any]] = []
+    seen_backups = set()
+    for entry in reversed(journal.entries):
+        recorded = entry.get("target")
+        if recorded and os.path.abspath(recorded) != target:
+            continue
+        # only "before this patch" states are worth offering: a revert entry
+        # points at the same backup as the apply that made it, and its hashes
+        # describe the other direction
+        action = entry.get("action")
+        if action not in RESTORABLE_ACTIONS:
+            continue
+        backup = entry.get("backup") or ""
+        if not backup or backup in seen_backups:
+            continue
+        seen_backups.add(backup)
+        exists = os.path.isfile(backup)
+        matches = None
+        if exists:
+            from .util import sha256_file
+
+            try:
+                matches = sha256_file(backup) == (entry.get("sha256_before") or "")
+            except OSError:
+                matches = False
+        items.append({
+            "index": len(items) + 1,
+            "action": action,
+            "time_utc": entry.get("time_utc", ""),
+            "bundle_id": entry.get("bundle_id") or "",
+            "patches": entry.get("patches") or [],
+            "backup": backup,
+            "backup_exists": exists,
+            "backup_matches": matches,
+            "sha256_before": entry.get("sha256_before", ""),
+            "sha256_after": entry.get("sha256_after", ""),
+            "restorable": exists and (matches is not False),
+        })
+    return items
+
+
+def restore_from(target_path: str, index: int = 1, force: bool = False,
+                 force_unlock: bool = False) -> Dict[str, Any]:
+    """Put back a *specific* recorded state (not just the last one).
+
+    ``revert`` undoes the most recent change; this is the recovery path when the
+    last change was not the one that broke things, or when ``revert`` refuses
+    because the file has been edited since. Every promise is still kept: the
+    backup must hash to the recorded original, the current file must be the one
+    the journal says it is (unless ``force``), and the swap is atomic.
+    """
+    from .journal import Journal, fsync_dir
+
+    target = os.path.abspath(target_path)
+    if not os.path.isfile(target):
+        raise PatchError("target not found: %s" % target, code=5)
+    if index < 1:
+        raise PatchError("--from counts from 1 (1 = the newest backup)", code=2)
+    items = history(target)
+    if not items:
+        raise PatchError("no recorded backups for %s — nothing to restore"
+                         % target, code=3)
+    if index > len(items):
+        raise PatchError("%s has %d recorded state(s); --from %d is out of range"
+                         % (os.path.basename(target), len(items), index), code=2)
+    item = items[index - 1]
+    backup = item["backup"]
+    if not os.path.isfile(backup):
+        raise PatchError("the backup for state %d is gone (%s) — restore it from "
+                         "your own copy" % (index, backup), code=5)
+    want = item.get("sha256_before") or ""
+    if want:
+        from .util import sha256_file
+
+        actual = sha256_file(backup)
+        if actual != want:
+            raise PatchError(
+                "the backup no longer matches what was recorded (%s… vs %s…) — "
+                "refusing to write a corrupt file"
+                % (actual[:16], want[:16]), code=3)
+
+    lock = TargetLock(target, action="restore", force=force_unlock)
+    try:
+        lock.acquire()
+    except LockError as exc:
+        raise PatchError(str(exc), code=5) from exc
+    try:
+        current = sha256_file(target)
+        expected = item.get("sha256_after") or ""
+        if expected and current != expected and not force:
+            raise PatchError(
+                "%s has changed since that state was recorded (sha256 %s… vs "
+                "%s…); if you mean it, add --force"
+                % (os.path.basename(target), current[:16], expected[:16]), code=3)
+        directory = os.path.dirname(target) or "."
+        ext = os.path.splitext(target)[1] or ".bin"
+        fd, tmp_path = tempfile.mkstemp(prefix=".surreal-restore-", suffix=ext,
+                                        dir=directory)
+        os.close(fd)
+        try:
+            shutil.copyfile(backup, tmp_path)
+            if want and sha256_file(tmp_path) != want:
+                raise PatchError("the staged copy did not verify — nothing written",
+                                 code=5)
+            _replace_target(tmp_path, target)
+            fsync_dir(directory)
+        except BaseException:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+        restored = sha256_file(target)
+        Journal(target).record("restore", backup=backup, from_index=index,
+                               source_action=item["action"],
+                               bundle_id=item.get("bundle_id", ""),
+                               sha256_before=current, sha256_after=restored)
+        return {"target": target, "backup": backup, "index": index,
+                "restored_sha256": restored, "sha256_before": current,
+                "source_action": item["action"]}
+    finally:
+        lock.release()
+
+
 def revert(target_path: str, force_unlock: bool = False) -> Dict[str, Any]:
     target = os.path.abspath(target_path)
     if not os.path.isfile(target):
@@ -868,6 +1010,10 @@ def _revert_locked(target: str) -> Dict[str, Any]:
         raise PatchError("backup missing: %s" % backup, code=5)
 
     current_sha = sha256_file(target)
+    if entry.get("sha256_before") and current_sha == entry["sha256_before"]:
+        raise PatchError(
+            "this file already has its original bytes (sha256 %s…) — nothing to "
+            "undo" % current_sha[:16], code=3)
     if entry.get("sha256_after") and current_sha != entry["sha256_after"]:
         raise PatchError(
             "target changed since it was patched (sha256 %s… vs expected %s…); "

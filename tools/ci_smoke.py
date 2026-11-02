@@ -269,6 +269,28 @@ def main() -> int:
         run("revert", state["app"])
         return "indexed, resolved by id, applied and reverted"
 
+    @scenario("history + restore")
+    def _history():
+        app = state["app"]
+        before = sha256_file(app)
+        run("apply", state["bundle"], "--target", app, "-y", "--keep-backups", "0")
+        run("undo", app)
+        run("apply", state["bundle"], "--target", app, "-y", "--keep-backups", "0")
+        code, out, _err = run("history", app, "--json")
+        states = json.loads(out)["states"]
+        if len(states) < 2 or not states[0]["restorable"]:
+            raise AssertionError("history did not record two restorable states: %s"
+                                 % states)
+        run("restore", app, "--from", "2")
+        if sha256_file(app) != before:
+            raise AssertionError("restore --from 2 did not return the file to its "
+                                 "pre-patch bytes")
+        code, out, _err = run("history", app)
+        if "--from" not in out:
+            raise AssertionError("history text lost its restore hint")
+        run("undo", app)
+        return "two states recorded, an older one restored, undo still friendly"
+
     @scenario("conditional bundle")
     def _conditions():
         # the example bundle declares machine/section/text preconditions and one

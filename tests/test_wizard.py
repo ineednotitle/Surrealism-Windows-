@@ -198,7 +198,7 @@ class TestEasyFlow(WizardCase):
     def test_undo_on_an_untouched_file_is_not_an_error(self):
         code, out, err = run("undo", self.app)
         self.assertEqual(code, 0)
-        self.assertIn("already looks original", out + err)
+        self.assertIn("nothing to revert", out + err)
 
     def test_policy_declined_writes_nothing(self):
         before = sha256_file(self.app)

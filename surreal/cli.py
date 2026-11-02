@@ -642,6 +642,68 @@ def cmd_revert(args, console: Console) -> int:
     return EXIT_OK
 
 
+def cmd_history(args, console: Console) -> int:
+    """Every recorded state of one file, newest first, with a restore hint."""
+    from . import journal as journalmod
+
+    target = os.path.abspath(args.target)
+    items = patcher.history(target)
+    if console.json_mode:
+        console.emit_json({"ok": True, "target": target, "states": items,
+                           "journal": journalmod.journal_path(target)})
+        return EXIT_OK
+    console.head(BANNER)
+    console.kv("file", target)
+    if not items:
+        console.say("")
+        console.say("  nothing has been patched here yet - no backups recorded.")
+        console.say("  (%s)" % journalmod.journal_path(target))
+        return EXIT_OK
+    console.say("")
+    for item in items:
+        state = ("backup ok" if item["restorable"]
+                 else ("backup missing" if not item["backup_exists"]
+                       else "backup does not verify"))
+        console.say("  [%d] %s  %s" % (item["index"], item["time_utc"] or "?",
+                                       item["action"]))
+        what = item["bundle_id"] or ", ".join(item["patches"]) or "-"
+        console.say("      patched with %s" % what)
+        console.say("      result %s  ·  %s" % ((item["sha256_after"] or "?")[:16],
+                                               state))
+        if not item["restorable"]:
+            console.warn("state %d cannot be restored (%s)" % (item["index"], state))
+    console.say("")
+    console.say("  put one back:  surreal restore %s --from %d"
+                % (os.path.basename(target), items[0]["index"]))
+    console.say("  undo the last: surreal undo %s" % os.path.basename(target))
+    return EXIT_OK
+
+
+def cmd_restore(args, console: Console) -> int:
+    """Restore a specific recorded state (recovery beyond plain `revert`)."""
+    try:
+        policy.require_acceptance()
+    except PermissionError as exc:
+        return _die(console, str(exc), EXIT_POLICY)
+    try:
+        result = patcher.restore_from(args.target, index=args.from_index,
+                                      force=args.force,
+                                      force_unlock=args.force_unlock)
+    except patcher.PatchError as exc:
+        return _die(console, str(exc), exc.code)
+    except OSError as exc:
+        return _die(console, "IO error: %s" % exc, EXIT_IO)
+    if console.json_mode:
+        console.emit_json({"ok": True, **result})
+        return EXIT_OK
+    console.head(BANNER)
+    console.ok("restored %s from state %d (%s)"
+               % (os.path.basename(result["target"]), result["index"],
+                  result["source_action"]))
+    console.kv("sha256 now", result["restored_sha256"])
+    return EXIT_OK
+
+
 def cmd_sign(args, console: Console) -> int:
     from . import keys as k
 
@@ -1401,8 +1463,10 @@ def cmd_undo(args, console: Console) -> int:
     try:
         result = patcher.revert(args.target, force_unlock=args.force_unlock)
     except patcher.PatchError as exc:
-        if "nothing to revert" in str(exc) or "already a revert" in str(exc):
-            console.warn("%s - the file already looks original" % exc)
+        text = str(exc)
+        if ("nothing to revert" in text or "already a revert" in text
+                or "already has its original bytes" in text):
+            console.warn("%s" % exc)
             return EXIT_OK
         return _die(console, str(exc), exc.code)
     except OSError as exc:
@@ -1646,6 +1710,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dir", action="append", metavar="DIR", default=[])
     sp.set_defaults(func=cmd_doctor)
 
+    sp = add("history", "list every recorded state of a file and its backup")
+    sp.add_argument("target")
+    sp.set_defaults(func=cmd_history)
+
+    sp = add("restore", "put back a specific recorded state (recovery, not just undo)")
+    sp.add_argument("target")
+    sp.add_argument("--from", dest="from_index", type=int, default=1, metavar="N",
+                    help="state to restore, 1 = newest (see `surreal history`)")
+    sp.add_argument("--force", action="store_true",
+                    help="restore even though the file changed since then")
+    sp.add_argument("--force-unlock", action="store_true",
+                    help="break a lock left by a crashed run")
+    sp.set_defaults(func=cmd_restore)
+
     sp = add("undo", "put the original file back (same as revert, plainer)")
     sp.add_argument("target")
     sp.add_argument("--force-unlock", action="store_true",
@@ -1670,8 +1748,9 @@ def _redirect_dropped_file(argv: List[str]) -> List[str]:
     if not argv or argv[0].startswith("-"):
         return argv
     known = {"init", "inspect", "scan", "diff", "info", "check", "apply",
-             "revert", "undo", "sign", "keys", "verify", "collection", "repo",
-             "tui", "demo", "selftest", "easy", "doctor", "help"}
+             "revert", "undo", "restore", "history", "sign", "keys", "verify",
+             "collection", "repo", "tui", "demo", "selftest", "easy", "doctor",
+             "help"}
     if argv[0] in known:
         return argv
     from . import wizard

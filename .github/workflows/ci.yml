@@ -158,6 +158,8 @@ jobs:
             echo "::error title=frozen exe failed at: easy::${tail_text:0:2500}"
             exit 1
           fi
+          step ./dist/surreal.exe history frozen-demo/demo_app.exe
+          step ./dist/surreal.exe restore frozen-demo/demo_app.exe --from 1
           step ./dist/surreal.exe undo frozen-demo/demo_app.exe
           echo "==== tui (piped)" | tee -a frozen.log
           if ! printf 'q\n' | ./dist/surreal.exe tui --target frozen-demo/demo_app.exe --dir frozen-demo/examples >> frozen.log 2>&1; then

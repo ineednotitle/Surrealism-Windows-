@@ -765,8 +765,11 @@ def doctor_checks(target: str = "", patches: Sequence[str] = (),
         last = entries[-1]
         text = "journal: %d recorded change(s), last was %s" % (len(entries),
                                                                last.get("action"))
-        if last.get("action") == "apply" and last.get("backup"):
+        if last.get("action") in ("apply", "apply-collection", "apply-vault") \
+                and last.get("backup"):
             text += " - `surreal undo %s` restores it" % os.path.basename(path)
+        if len(entries) > 1:
+            text += " (`surreal history %s` lists every state)" % os.path.basename(path)
         checks.append(("ok", text))
     else:
         checks.append(("ok", "no previous patching history for this file"))

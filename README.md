@@ -133,6 +133,8 @@ $ python -m surreal check surreal-demo/demo-shorten-nag.morph `
 | `easy [<exe>|<folder>]` | **guided mode** — finds patches, explains which fit, applies with a rollback; a bare `surreal <exe>` (drag-and-drop) is the same thing |
 | `doctor [<exe>|<folder>]` | explains every reason a patch might not apply here (policy, permissions, temp space, PE validity, build match) |
 | `undo <exe>` | plain-language `revert`: puts the original file back, and treats "already original" as success |
+| `history <exe>` | every recorded state of that file, newest first, each with its backup, the patch that made it and whether the backup still verifies (`--json` for scripts) |
+| `restore <exe> --from N` | put back a *specific* past state — recovery when `undo` is not enough, or when the file was edited since |
 | `init` | prints the acceptable-use policy; `--accept-policy` records it (required before the first write), `--revoke` forgets it |
 | `inspect <exe>` | PE32/PE32+ headers, sections, entropy, checksum, overlay, Authenticode state, imports/exports, notable strings, and honest heuristics ("section .vmp0 present: looks like VMProtect") |
 | `scan <exe> --pattern "48 8B ?? E8"` | wildcard byte search → file offset, RVA, section, hexdump |
@@ -398,6 +400,21 @@ The safety story is a proof, not a promise:
 The Windows legs are not an afterthought: the frozen-exe path, console encodings
 and the resource-free RSS profiling were all found and fixed there. `surreal` is
 pure standard library, so the same code runs from source and from the `.exe`.
+
+## When something goes wrong
+
+| Symptom | What to do |
+|---|---|
+| the patch does nothing / "does not match this build" | `surreal doctor app.exe` — it names the mismatch (size, hash, machine, missing section) and which patches would fit |
+| the program behaves badly after patching | `surreal undo app.exe` — one command, verified, atomic |
+| you patched twice, or the file was edited since | `surreal history app.exe` then `surreal restore app.exe --from 2` |
+| "cannot replace … the file is locked" | close the program (and any launcher holding it), or add a folder exclusion to your antivirus |
+| a patch refuses with "does not fit this build" | the bundle declares conditions the target fails; re-author it against your build with `surreal diff` |
+| you have no patch files at all | `surreal demo` writes a practice pair, and `surreal diff old.exe new.exe -o mine.morph --id com.you.mine` makes one from two builds you own |
+
+Every state is journalled next to the file (`.surreal/`), the backup is verified
+against a SHA-256 before it is used, and nothing is written unless the staged copy
+re-hashes correctly — so a failed restore leaves the file exactly as it was.
 
 ## Try it on your own binary (read-only)
 
