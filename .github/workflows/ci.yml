@@ -166,6 +166,27 @@ jobs:
             exit 1
           fi
           echo "all frozen smoke steps passed"
+      - name: Measure and hash the exe
+        shell: bash
+        run: |
+          python - <<'EOF'
+          import hashlib, os
+          path = os.path.join("dist", "surreal.exe")
+          size = os.path.getsize(path)
+          digest = hashlib.sha256()
+          with open(path, "rb") as fh:
+              for chunk in iter(lambda: fh.read(1 << 20), b""):
+                  digest.update(chunk)
+          with open("size.txt", "w", encoding="ascii") as fh:
+              fh.write("size: %.1f MB (%d bytes)\n" % (size / 1048576.0, size))
+          with open("surreal.exe.sha256", "w", encoding="ascii") as fh:
+              fh.write("%s  surreal.exe\n" % digest.hexdigest())
+          message = "surreal.exe %.1f MB sha256 %s" % (size / 1048576.0,
+                                                       digest.hexdigest())
+          print(message)
+          print("::notice title=frozen surreal.exe::" + message)
+          EOF
+          cat size.txt surreal.exe.sha256
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -173,10 +194,13 @@ jobs:
           path: |
             dist/surreal.exe
             size.txt
+            surreal.exe.sha256
           if-no-files-found: error
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/surreal.exe
+          files: |
+            dist/surreal.exe
+            surreal.exe.sha256
           generate_release_notes: true
