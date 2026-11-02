@@ -1,0 +1,208 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "arena/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        python: ["3.9", "3.12"]
+        exclude:
+          - os: macos-latest
+            python: "3.9"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Show interpreter
+        run: python --version
+      - name: Unit tests (stdlib only, no pip install)
+        shell: bash
+        run: |
+          set -o pipefail
+          python run_tests.py -v 2>&1 | tee unit-tests.log
+      - name: Self test (build -> diff -> check -> apply -> revert)
+        shell: bash
+        run: |
+          set -o pipefail
+          python -u -m surreal selftest 2>&1 | tee selftest.log
+      - name: End-to-end smoke (demo, sign, surgery, vault, repo, tui)
+        shell: bash
+        run: |
+          set -o pipefail
+          python -u tools/ci_smoke.py 2>&1 | tee ci-smoke.log
+      - name: Performance budget
+        run: python tools/bench.py --mb 32
+      - name: Surface failures as annotations
+        if: failure()
+        shell: bash
+        run: |
+          for log in selftest.log ci-smoke.log; do
+            if [ -f "$log" ]; then
+              fails=$(grep -E "^[[:space:]]*(FAIL|ERROR)" "$log" | head -8 || true)
+              if [ -n "$fails" ]; then
+                printf '%s\n' "$fails" | while IFS= read -r line; do
+                  echo "::error title=${log}::${line}"
+                done
+              else
+                tail_text=$(tail -n 40 "$log" | tr '\n' '|' | sed 's/%/%25/g')
+                echo "::error title=${log} (tail)::${tail_text:0:3000}"
+              fi
+            fi
+          done
+          python - <<'EOF'
+          import os, re
+          path = "unit-tests.log"
+          if not os.path.isfile(path):
+              raise SystemExit(0)
+          text = open(path, encoding="utf-8", errors="replace").read()
+          blocks = re.split(r"^={70}$", text, flags=re.M)
+          shown = 0
+          for block in blocks:
+              head = re.search(r"^(FAIL|ERROR): (\S+) \((\S+)\)", block, re.M)
+              if not head:
+                  continue
+              detail = block.strip().splitlines()[-6:]
+              message = " | ".join(line.strip() for line in detail if line.strip())
+              message = message.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+              print("::error title=%s %s::%s" % (head.group(1), head.group(2), message[:900]))
+              shown += 1
+              if shown >= 8:
+                  break
+          EOF
+
+  lint:
+    name: static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile every module (syntax + import graph)
+        run: python -m compileall -q surreal && python -c "import surreal.cli, surreal.testkit"
+      - name: No network imports in the tool (it must run offline)
+        run: |
+          if grep -rnE "^\s*(import|from)\s+(socket|urllib|http|ftplib|requests|ssl)" surreal/; then
+            echo "::error::surreal must not use the network"; exit 1
+          fi
+      - name: No private keys committed
+        run: |
+          if git ls-files | grep -E "(^|/)([^/]*\.key|[^/]*\.private)$"; then
+            echo "::error::private keys must never be committed"; exit 1
+          fi
+      - name: No shell execution in the tool
+        run: |
+          if grep -rnE "(subprocess|os\.system|popen|eval\(|exec\()" surreal/; then
+            echo "::error::surreal must not execute anything"; exit 1
+          fi
+
+  windows-exe:
+    name: build surreal.exe
+    needs: [test, lint]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          python -m PyInstaller --clean --noconfirm build/surreal.spec
+      - name: Smoke test the frozen binary
+        shell: bash
+        run: |
+          set -o pipefail
+          : > frozen.log
+          step() {
+            echo "==== $*" | tee -a frozen.log
+            if ! "$@" >> frozen.log 2>&1; then
+              tail_text=$(tail -n 25 frozen.log | tr '\n' '|' | sed 's/%/%25/g')
+              echo "::error title=frozen exe failed at: $*::${tail_text:0:2500}"
+              exit 1
+            fi
+          }
+          step ./dist/surreal.exe --version
+          step ./dist/surreal.exe doctor
+          step ./dist/surreal.exe selftest
+          step ./dist/surreal.exe demo --out frozen-demo
+          step ./dist/surreal.exe check frozen-demo/demo-shorten-nag.morph --target frozen-demo/demo_app.exe
+          step ./dist/surreal.exe keys --generate frozen-demo/frozen.key --label frozen
+          step ./dist/surreal.exe sign frozen-demo/demo-shorten-nag.morph --key frozen-demo/frozen.key
+          step ./dist/surreal.exe verify frozen-demo/demo-shorten-nag.morph
+          step ./dist/surreal.exe init --accept-policy
+          step ./dist/surreal.exe apply frozen-demo/demo-shorten-nag.morph --target frozen-demo/demo_app.exe -y
+          step ./dist/surreal.exe revert frozen-demo/demo_app.exe
+          cp -r examples frozen-demo/examples
+          step ./dist/surreal.exe collection list frozen-demo/examples
+          step ./dist/surreal.exe repo index frozen-demo/examples -o frozen-demo/repo.json
+          step ./dist/surreal.exe repo list frozen-demo/repo.json --target frozen-demo/demo_app.exe
+          echo "==== easy mode (dragged file)" | tee -a frozen.log
+          if ! ./dist/surreal.exe frozen-demo/demo_app.exe --yes >> frozen.log 2>&1; then
+            tail_text=$(tail -n 25 frozen.log | tr '\n' '|' | sed 's/%/%25/g')
+            echo "::error title=frozen exe failed at: easy::${tail_text:0:2500}"
+            exit 1
+          fi
+          step ./dist/surreal.exe history frozen-demo/demo_app.exe
+          step ./dist/surreal.exe restore frozen-demo/demo_app.exe --from 1
+          step ./dist/surreal.exe undo frozen-demo/demo_app.exe
+          echo "==== tui (piped)" | tee -a frozen.log
+          if ! printf 'q\n' | ./dist/surreal.exe tui --target frozen-demo/demo_app.exe --dir frozen-demo/examples >> frozen.log 2>&1; then
+            tail_text=$(tail -n 25 frozen.log | tr '\n' '|' | sed 's/%/%25/g')
+            echo "::error title=frozen exe failed at: tui::${tail_text:0:2500}"
+            exit 1
+          fi
+          echo "all frozen smoke steps passed"
+      - name: Measure and hash the exe
+        shell: bash
+        run: |
+          python - <<'EOF'
+          import hashlib, os
+          path = os.path.join("dist", "surreal.exe")
+          size = os.path.getsize(path)
+          digest = hashlib.sha256()
+          with open(path, "rb") as fh:
+              for chunk in iter(lambda: fh.read(1 << 20), b""):
+                  digest.update(chunk)
+          with open("size.txt", "w", encoding="ascii") as fh:
+              fh.write("size: %.1f MB (%d bytes)\n" % (size / 1048576.0, size))
+          with open("surreal.exe.sha256", "w", encoding="ascii") as fh:
+              fh.write("%s  surreal.exe\n" % digest.hexdigest())
+          message = "surreal.exe %.1f MB sha256 %s" % (size / 1048576.0,
+                                                       digest.hexdigest())
+          print(message)
+          print("::notice title=frozen surreal.exe::" + message)
+          EOF
+          cat size.txt surreal.exe.sha256
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: surreal-windows-x64
+          path: |
+            dist/surreal.exe
+            size.txt
+            surreal.exe.sha256
+          if-no-files-found: error
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/surreal.exe
+            surreal.exe.sha256
+          generate_release_notes: true

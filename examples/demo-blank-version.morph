@@ -1,0 +1,74 @@
+{
+  "format": "surreal.morph",
+  "format_version": 1,
+  "id": "org.surreal.demo.blank-version",
+  "name": "Demo: blank the version string",
+  "version": "1.0.0",
+  "description": "Hides the build string in .rdata. Size-preserving, so it can be combined with other patches in a collection.",
+  "created_utc": "2026-11-01T00:00:00Z",
+  "author": "surreal demo",
+  "tool": {
+    "name": "surreal",
+    "version": "0.5.0"
+  },
+  "target": {
+    "filename": "demo_app.exe",
+    "size": 2048,
+    "sha256": "4d51cec411ac4bf2856d007044be52d8da0713e4abe227f02244193c66251408",
+    "pe": {
+      "magic": "0x20B",
+      "machine": "0x8664",
+      "timestamp": 1593835520,
+      "entrypoint_rva": 4096,
+      "image_base": 5368709120
+    },
+    "authenticode": false,
+    "sections": [
+      {
+        "name": ".text",
+        "rva": 4096,
+        "raw_size": 512,
+        "raw_sha256": "b8649f444afc99b469c878ae9411227be76ca16a921d44da7b9d6fc13820c946"
+      },
+      {
+        "name": ".rdata",
+        "rva": 8192,
+        "raw_size": 512,
+        "raw_sha256": "46ed15310bc6e63f7c8f654a3077b7cd6efa7ae0583d95f6c6fced9bfb05f6de"
+      },
+      {
+        "name": ".data",
+        "rva": 12288,
+        "raw_size": 512,
+        "raw_sha256": "9758628d2a46a2542de4786e2b4df3af701f6571bae4df97ae9fc1b73669c367"
+      }
+    ]
+  },
+  "anchors": [
+    {
+      "name": "anchor_0",
+      "pattern": "00 53 75 72 72 65 61 6C",
+      "unique": true,
+      "file_offset": 1054,
+      "rva": 8222,
+      "section": ".rdata",
+      "comment": "8 bytes of literal context at file offset 0x41E"
+    }
+  ],
+  "hunks": [
+    {
+      "anchor": 0,
+      "delta": -30,
+      "section": ".rdata",
+      "rva": 8192,
+      "offset": 1024,
+      "expect": "56 65 72 73 69 6F 6E 20 31 2E 30 2E 30 20 62 75 69 6C 64 20 32 30 32 36 2D 31 31 2D 30 31",
+      "replace": "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00",
+      "comment": "bytes 1024..1054"
+    }
+  ],
+  "policy": {
+    "requires_rights_attestation": true,
+    "forbidden_categories": []
+  }
+}

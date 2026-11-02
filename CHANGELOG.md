@@ -1,0 +1,205 @@
+# Changelog
+
+All notable changes to **Surrealism Window** (`surreal`). Bundle format version is
+`surreal.morph` v1 throughout; every release is additive within that format, so a
+bundle written for an older version keeps loading.
+
+## Unreleased
+
+* `docs/QUICKSTART.md` — a one-page, non-technical walkthrough (download → drag →
+  three answers → undo), linked from the top of the README.
+* `surreal --help` leads with `easy` and `doctor` and ends with a "start here"
+  block, because that output is the first thing a new user reads.
+
+## v0.7.0 — history, restore, manifest-free folders
+
+* `surreal history <exe>` lists every recorded state of a file, newest first: when,
+  which bundle (or patch set), the resulting hash, and whether the backup still
+  exists and still hashes to the recorded original. `--json` for scripts.
+* `surreal restore <exe> [--from N]` puts back a *specific* state — the recovery
+  path when `undo` is not enough or the file was edited since. It verifies the
+  backup against the recorded hash, verifies the staged copy before the atomic
+  swap, refuses to overwrite a file that changed unless `--force`, and records
+  itself in the journal.
+* `undo` now recognises "the file already has its original bytes" and treats it as
+  success with an explanation, instead of a scary mismatch.
+* `doctor` points at `history` when a file has more than one recorded change.
+* Dropping a **folder** no longer needs a hand-written
+  `surreal-collection.json`: `.morph` files sitting next to the `.exe`/`.dll`
+  files are paired with the one program they match (a filename hint breaks ties),
+  applied as the same all-or-nothing vault transaction, and anything ambiguous or
+  unmatched is reported instead of guessed. `surreal doctor <folder>` explains the
+  same pairing.
+* 17 new tests and one new CI scenario (15 total); the frozen-exe smoke also runs
+  `history` and `restore`.
+
+## v0.6.1 — packaging
+
+* The Windows build publishes the frozen binary's size and SHA-256 again: a
+  `surreal.exe.sha256` asset next to the exe, plus a build notice. (An earlier CI
+  edit had dropped the measurement step, so the release carried no checksum.)
+* No code changes: `surreal --version` bumps to match the tag.
+
+## v0.6.0 — conditions, easy mode, doctor, undo
+
+### Conditional patches (declarative, no code execution)
+* A bundle may declare `requires` — all of which must hold, or the patch is
+  refused before anything is written (exit 3, message explains which condition
+  failed) — and any hunk may carry `when`, which skips just that hunk with a note.
+* Condition vocabulary: `all`/`any`/`not`, `machine`, `is_dotnet`, `is_dll`,
+  `has_overlay`, `has_signature`, `section`, `section_is_executable`, `string`,
+  `utf16`, `pattern` (with `??` wildcards), `size_at_least`, `size_at_most`, each
+  with an optional `comment`.
+* Bounded by design: max 32 nodes, 64 list entries, 4096-character needles, fixed
+  nesting depth — a hostile bundle cannot make `check` expensive. Non-PE (raw
+  offset) targets fail closed rather than skip a condition they cannot prove.
+* If every hunk is skipped by its own condition the patch errors
+  ("none of N hunk(s) apply to this build") instead of silently doing nothing.
+* `surreal diff` can author them: `--requires-machine`, `--requires-section NAME`,
+  `--requires-string TEXT`. `surreal info` lists them; `check --json` returns
+  `plan.requires` and `plan.skipped_hunks`.
+* New example `examples/demo-conditional.morph` and doc
+  [`docs/CONDITIONS.md`](docs/CONDITIONS.md); 47 new tests, 1 new CI scenario.
+
+### Easy mode, doctor, undo (same release)
+
+### A guided front end
+* `surreal easy [<exe>|<folder>]` (and simply **dragging a file onto
+  `surreal.exe`**, which is now routed there instead of erroring) finds `.morph`
+  files next to the program, in a `patches/` sibling, in `%SURREAL_PATCHES%`, in
+  `Downloads`/`Desktop` and in the current folder, then says per patch whether it
+  fits *this* build.
+  It explains the usage policy in five lines once per machine, backs up, applies
+  the chosen subset, rolls everything back if a later patch fails, and prints the
+  exact undo command.
+* `surreal doctor [<exe>|<folder>]` reports, in order: version/runtime, settings
+  folder writability, policy state, temp space, PE validity, write permission,
+  stale locks, journal history, and which patches match — with `--json` for
+  scripts.
+* `surreal undo <exe>` is `revert` in plainer words, and treats "nothing to
+  undo" as success instead of an error.
+* A folder (or a whole application directory with a `surreal-collection.json`)
+  can be dropped instead of a single file: easy mode then runs the vault
+  preflight and applies every file as one transaction.
+* `--json` for easy mode: `{ok, target, patches[{id,applies,reason,signed_by}],
+  applied[]}` — a supported way to ask "does a patch exist for this build?".
+* Easy mode never writes to stdout in `--json` mode, works with piped answers
+  (`printf 'y\na\ny\n' | surreal easy app.exe`), and is covered by unit tests plus
+  CI smoke scenarios and the frozen-exe smoke run.
+* A frozen `surreal.exe` started from Explorer now keeps its console window open
+  on failure ("Press Enter to close"), instead of flashing and vanishing — the
+  single most common way a double-clicked console tool looks "broken".
+
+## v0.5.0 — layout changes, vaults, dependencies, repos
+
+### Collections across files
+* Vault collections validate the dependency graph of the *whole* manifest, not one
+  target at a time: cross-file `depends_on` is honoured, disabled/absent
+  dependencies block the run, conflicts are caught across files, and cycles are
+  refused before any byte is written.
+* New `surreal collection graph <collection> [--json]` shows patches, their target
+  file, requirements and conflicts; `collection check --json` now embeds the same
+  graph.
+
+### Header surgery (`op: extend-section`, `op: add-section`)
+* `extend-section` grows the **last** section: appends the payload at EOF (padded
+  to `FileAlignment`) and rewrites that section's `VirtualSize`, `SizeOfRawData`
+  and the image's `SizeOfImage`. No RVA fixups are needed because nothing after
+  the last section moves.
+* `add-section` writes a new 40-byte section header (when the headers have at
+  least 40 bytes of slack) plus its aligned raw data.
+* New module `surreal/surgery.py` plans and *proves* both: refusals for non-last
+  sections, existing overlays, last-section raw end ≠ EOF, RVA collisions,
+  invalid `virtual_size_after` and full headers; after writing, the temp file is
+  re-parsed and `NumberOfSections`, `SizeOfImage`, file size, section bounds and
+  the checksum are checked **before** the atomic swap.
+* `surreal diff` emits a surgery hunk only when replaying it through the real
+  applier reproduces the new build byte-for-byte (checksum field excepted).
+* One size/layout hunk per bundle, and never with `--accept-drift`.
+
+### Multi-file vaults
+* A collection whose entries all name a relative `target` becomes a vault:
+  `surreal collection apply vault/ --target "C:/Apps/App"` patches every named
+  binary as one transaction, with one backup and one journal entry per file and
+  all-or-nothing rollback across files.
+* Paths are confined to the root (absolute paths, drive letters, `..` and
+  symlink escapes refused).
+* The per-directory journal now filters entries by target path, so two binaries
+  side by side keep separate histories and `surreal revert <file>` stays exact.
+
+### Dependencies and conflicts
+* `"depends_on": [...]` — stable topological ordering on top of `order`/id;
+  cycles, self-references, unknown ids and disabled dependencies are refused.
+* `"conflicts_with": [...]` — refused when both bundles are applicable.
+* Bundle ids must be unique inside one collection.
+
+### Local patch repositories
+* `surreal repo index|list|show|apply` over a folder of `.morph` files: a JSON
+  index with per-bundle sha256, target identity, ops and signer. Applying refuses
+  a bundle whose bytes no longer match the index. Still zero network code.
+
+### Interactive mode
+* `surreal tui --target app.exe --dir patches/`: toggle bundles with numbers,
+  `a` to apply the selection as one transaction, `r` to revert, `q` to quit. Plain
+  line input (no curses), so it works frozen, over SSH and when piped.
+
+### Windows fixes (found by the Windows CI legs, not guesswork)
+* The frozen `surreal.exe` used to die on `--version`: PyInstaller was pointed at
+  `surreal/cli.py`, which breaks the package's relative imports at startup. It now
+  freezes the `surreal.py` shim, and `surreal.collection`, `surreal.repo` and
+  `surreal.surgery` are in the hidden imports (a frozen build previously lost
+  them).
+* A console that cannot encode the UI glyphs (cp1252/cp437) no longer crashes a
+  run: the console detects the encoding and falls back to `OK` / `XX` / `->`.
+* `resource` and `os.uname()` were imported unconditionally by the perf tests, so
+  the whole Windows test leg failed; peak-RSS measurement now lives in
+  `memguard.peak_rss_mb()` with a Windows psapi path and an explicit "unknown".
+* `surreal/lock.py` no longer imports `socket` (it only wanted a hostname) — the
+  "no network modules" lint rule now holds without an exception.
+* The bench harness prints ASCII only and reports an unknown RSS as `n/a`.
+
+### Other
+* `collection apply --dry-run` (single-target and vault).
+* Windows lock/permission errors during the swap now explain what to do instead
+  of surfacing `[WinError 32]`.
+* `surreal info` / `check` describe surgery hunks and layout changes.
+* 277 tests, 17-step `selftest`, CI smoke steps for surgery, vault and repo.
+
+## v0.4.0 — collections
+
+* `surreal collection list|check|apply`: an ordered set of size-preserving
+  bundles applied as one transaction (one backup, one journal entry, rollback on
+  failure). Manifest paths confined to the collection directory.
+* Members must be size-preserving, and the first member must match the pristine
+  build exactly; later members keep full per-hunk byte verification.
+
+## v0.3.0 — overlay size changes
+
+* `op: append` / `op: truncate`: grow or shrink the overlay (the bytes after the
+  last section's raw data), which needs no header edits.
+* `surreal diff` classifies a size-changing pair instead of refusing it, and
+  still refuses every change inside the mapped image.
+* Refusals: mixing append and truncate, image locators on an overlay hunk,
+  `--accept-drift` on any size change.
+* Non-PE targets are patchable when a bundle is all raw offsets + EOF ops
+  (`surreal diff --force`).
+
+## v0.2.0 — identity, concurrency, ASLR
+
+* ed25519 signatures over `.morph` bundles (pure standard library), trusted-key
+  store, `surreal sign` / `verify` / `keys`, `--require-signature`.
+* Crash-safe apply lock (`<dir>/.surreal/lock`) with `--force-unlock`.
+* ASLR / relocation safety: warn (or refuse with `--allow-abs-address`) when a
+  hunk overwrites an absolute field covered by the base-relocation table.
+* `--max-mem` ceiling on any whole-file read.
+* Documented what it means when a signature is valid but the bundle is still a
+  bad idea.
+
+## v0.1.0 — first usable tool
+
+* PE32/PE32+ parser, byte/string scanner, `diff` → `.morph` bundle, `check`,
+  `apply` (lock → backup → verify → patch a copy → checksum → atomic swap →
+  journal), `revert`, `inspect`, `demo`, `selftest`.
+* Acceptable-use policy gate and legal positioning.
+* Pure standard library, mmap-based, constant memory; PyInstaller one-file build
+  in CI for Windows x64.
