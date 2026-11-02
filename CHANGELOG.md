@@ -4,6 +4,13 @@ All notable changes to **Surrealism Window** (`surreal`). Bundle format version 
 `surreal.morph` v1 throughout; every release is additive within that format, so a
 bundle written for an older version keeps loading.
 
+## Unreleased
+
+* `docs/QUICKSTART.md` — a one-page, non-technical walkthrough (download → drag →
+  three answers → undo), linked from the top of the README.
+* `surreal --help` leads with `easy` and `doctor` and ends with a "start here"
+  block, because that output is the first thing a new user reads.
+
 ## v0.7.0 — history, restore, manifest-free folders
 
 * `surreal history <exe>` lists every recorded state of a file, newest first: when,

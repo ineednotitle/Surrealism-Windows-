@@ -23,6 +23,10 @@ the app — reproducibly, reversibly, and on a 4 GB machine.
 
 ## Start here (no command line knowledge needed)
 
+> **New to this?** [`docs/QUICKSTART.md`](docs/QUICKSTART.md) is a one-page,
+> non-technical walkthrough: download, drag, answer three questions, and how to
+> undo it.
+
 Download `surreal.exe`, then **drag the program you want to patch onto it** (or
 double-click it and drag the file into the window). That is the whole procedure:
 
@@ -491,8 +495,8 @@ tools/                   bench.py (low-end benchmark), ci_smoke.py (14 end-to-en
                          scenarios), make_examples.py (reproducible examples)
 examples/                five ready-made bundles + a collection + a repo index
 build/                   PyInstaller spec + Windows/macOS/Linux build scripts
-docs/                    ARCHITECTURE · PATCH_FORMAT · SIGNING · COLLECTIONS
-                         CONDITIONS · LEGAL · COMPATIBILITY
+docs/                    QUICKSTART · ARCHITECTURE · PATCH_FORMAT · SIGNING
+                         COLLECTIONS · CONDITIONS · LEGAL · COMPATIBILITY
 ```
 
 ## Development
