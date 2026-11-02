@@ -40,7 +40,7 @@ Pick whichever fits your machine:
 
 | Method | Command | Notes |
 |---|---|---|
-| Prebuilt binary | download `surreal.exe` from [Releases](../../releases) | no Python needed, ~11 MB, unsigned |
+| Prebuilt binary | download `surreal.exe` from [Releases](../../releases/tag/v0.5.0) | no Python needed, ~8 MB, unsigned; SHA-256 in the release notes |
 | From source (any OS) | `git clone … && cd Surrealism-Windows- && python -m surreal --help` | Python 3.9+, **stdlib only** — no pip install |
 | Build your own exe | `powershell -ExecutionPolicy Bypass -File build/build_windows.ps1` | needs `pip install pyinstaller` |
 
@@ -49,6 +49,17 @@ Running from source on Windows:
 ```powershell
 py -3 -m surreal selftest      # end-to-end check on a generated PE
 py -3 -m surreal demo          # writes surreal-demo\ with a practice target
+```
+
+The released `surreal.exe` is the artifact CI smoke-tested minutes earlier on
+Windows — `--version`, `selftest`, demo/check/sign/verify/apply/revert,
+`collection list`, `repo index`/`list` and a piped `tui` — so a download that
+starts at all has already proven it can patch and revert a real PE. Verify it
+before running:
+
+```powershell
+certutil -hashfile surreal.exe SHA256     # compare with the release notes
+.\surreal.exe selftest                    # 17 checks, no files outside %TEMP%
 ```
 
 ## Try it in 60 seconds (no real exe involved)
