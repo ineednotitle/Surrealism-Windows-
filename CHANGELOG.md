@@ -4,6 +4,13 @@ All notable changes to **Surrealism Window** (`surreal`). Bundle format version 
 `surreal.morph` v1 throughout; every release is additive within that format, so a
 bundle written for an older version keeps loading.
 
+## v0.6.1 — packaging
+
+* The Windows build publishes the frozen binary's size and SHA-256 again: a
+  `surreal.exe.sha256` asset next to the exe, plus a build notice. (An earlier CI
+  edit had dropped the measurement step, so the release carried no checksum.)
+* No code changes: `surreal --version` bumps to match the tag.
+
 ## v0.6.0 — conditions, easy mode, doctor, undo
 
 ### Conditional patches (declarative, no code execution)
