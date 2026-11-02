@@ -4,7 +4,7 @@ All notable changes to **Surrealism Window** (`surreal`). Bundle format version 
 `surreal.morph` v1 throughout; every release is additive within that format, so a
 bundle written for an older version keeps loading.
 
-## Unreleased
+## v0.5.0 — layout changes, vaults, dependencies, repos
 
 ### Collections across files
 * Vault collections validate the dependency graph of the *whole* manifest, not one
@@ -14,8 +14,6 @@ bundle written for an older version keeps loading.
 * New `surreal collection graph <collection> [--json]` shows patches, their target
   file, requirements and conflicts; `collection check --json` now embeds the same
   graph.
-
-## v0.5.0 — layout changes, vaults, dependencies, repos
 
 ### Header surgery (`op: extend-section`, `op: add-section`)
 * `extend-section` grows the **last** section: appends the payload at EOF (padded
