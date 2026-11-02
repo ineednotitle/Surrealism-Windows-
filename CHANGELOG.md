@@ -4,7 +4,7 @@ All notable changes to **Surrealism Window** (`surreal`). Bundle format version 
 `surreal.morph` v1 throughout; every release is additive within that format, so a
 bundle written for an older version keeps loading.
 
-## Unreleased — history, restore, manifest-free folders
+## v0.7.0 — history, restore, manifest-free folders
 
 * `surreal history <exe>` lists every recorded state of a file, newest first: when,
   which bundle (or patch set), the resulting hash, and whether the backup still
