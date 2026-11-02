@@ -464,15 +464,17 @@ Full policy, including the takedown process: [`docs/LEGAL.md`](docs/LEGAL.md).
 ```
 PLAN.md                  design + roadmap (read this first)
 surreal/                 the tool: pe.py, scanner.py, diffgen.py, patcher.py,
-                         keys.py (ed25519), lock.py, reloc.py, memguard.py,
-                         collection.py, testkit.py
+                         script.py (declarative conditions), wizard.py (easy mode,
+                         doctor), keys.py (ed25519), lock.py, reloc.py,
+                         memguard.py, collection.py, repo.py, surgery.py
 surreal/testkit.py       synthetic PE builder + `surreal selftest`
-tests/                   204 unit tests, incl. perf/RAM budget tests
-tools/bench.py           low-end benchmark harness
-examples/                three ready-made bundles + a collection + walkthrough
+tests/                   388 unit tests, incl. perf/RAM budget tests
+tools/                   bench.py (low-end benchmark), ci_smoke.py (14 end-to-end
+                         scenarios), make_examples.py (reproducible examples)
+examples/                five ready-made bundles + a collection + a repo index
 build/                   PyInstaller spec + Windows/macOS/Linux build scripts
 docs/                    ARCHITECTURE · PATCH_FORMAT · SIGNING · COLLECTIONS
-                         LEGAL · COMPATIBILITY
+                         CONDITIONS · LEGAL · COMPATIBILITY
 ```
 
 ## Development
