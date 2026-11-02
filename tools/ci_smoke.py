@@ -269,6 +269,24 @@ def main() -> int:
         run("revert", state["app"])
         return "indexed, resolved by id, applied and reverted"
 
+    @scenario("folder of loose patches")
+    def _loose_folder():
+        # a beginner's folder: the programs and the .morph files together, no
+        # manifest anywhere. Easy mode builds the set itself.
+        loose = os.path.join(work, "loose")
+        os.makedirs(loose, exist_ok=True)
+        shutil.copyfile(state["app"], os.path.join(loose, "app.exe"))
+        shutil.copyfile(state["bundle"], os.path.join(loose, "tweak.morph"))
+        before = sha256_file(os.path.join(loose, "app.exe"))
+        code, out, err = run("easy", loose, "--yes")
+        if "one transaction" not in out:
+            raise AssertionError("loose folder was not applied as a set:\n%s%s"
+                                 % (out, err))
+        if sha256_file(os.path.join(loose, "app.exe")) == before:
+            raise AssertionError("loose folder patching changed nothing")
+        run("undo", os.path.join(loose, "app.exe"))
+        return "no manifest needed: 1 bundle paired with 1 program and reverted"
+
     @scenario("history + restore")
     def _history():
         app = state["app"]

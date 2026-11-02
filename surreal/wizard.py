@@ -515,6 +515,85 @@ def _run_file(console, target: str, patches: Sequence[str],
     return EXIT_OK
 
 
+def collection_from_folder(console, folder: str) -> Tuple[Any, List[str]]:
+    """Build a patch set from loose ``.morph`` files next to the programs.
+
+    Beginners download a pack of bundles and drop the folder on the tool; they are
+    not going to hand-write a manifest first. So: pair every bundle with the one
+    binary it matches, in a stable order, and hand the result to the same vault
+    transaction `collection apply` uses (all-or-nothing, per-file backups).
+
+    Returns ``(collection, warnings)``. Ambiguous matches are left out and said so
+    rather than guessed.
+    """
+    from . import collection as coll
+
+    root = os.path.abspath(folder)
+    warnings: List[str] = []
+
+    def inside(name: str) -> str:
+        return os.path.join(root, *name.split("/"))
+
+    # binaries: this folder only (a vault is one application directory)
+    binaries: List[str] = []
+    for name in sorted(os.listdir(root)):
+        if name.lower().endswith((".exe", ".dll")):
+            binaries.append(name)
+    if not binaries:
+        return None, ["there is no .exe or .dll in %s" % root]
+
+    bundle_paths = find_patches(os.path.join(root, binaries[0]), [root])
+    bundle_paths = [b for b in bundle_paths
+                    if os.path.dirname(os.path.abspath(b)) == root
+                    or os.path.dirname(os.path.abspath(b)) ==
+                    os.path.join(root, "patches")]
+    if not bundle_paths:
+        return None, ["there are no .morph patch files in %s" % root]
+
+    entries: List[coll.Entry] = []
+    for path in sorted(bundle_paths):
+        try:
+            bundle = Bundle.load(path)
+        except (BundleError, OSError, ValueError) as exc:
+            warnings.append("ignoring %s: %s" % (os.path.basename(path), exc))
+            continue
+        blocked = bundle.is_policy_blocked()
+        if blocked:
+            warnings.append("ignoring %s: %s" % (os.path.basename(path), blocked))
+            continue
+        matches = [name for name in binaries
+                   if describe(bundle, inside(name))[0]]
+        if not matches:
+            warnings.append("%s does not match any program here"
+                            % os.path.basename(path))
+            continue
+        if len(matches) > 1:
+            hinted = (bundle.target or {}).get("filename") or ""
+            if hinted in matches:
+                matches = [hinted]
+            else:
+                warnings.append("%s could patch more than one file (%s) — add a "
+                                "manifest to say which"
+                                % (os.path.basename(path), ", ".join(matches)))
+                continue
+        entries.append(coll.Entry(bundle_file=os.path.basename(path),
+                                  bundle=bundle, path=path,
+                                  target=matches[0]))
+    if not entries:
+        return None, warnings
+    collection = coll.Collection(name="loose patches in %s" % os.path.basename(root),
+                                 entries=entries, base_dir=root,
+                                 description="built from the .morph files found "
+                                             "next to the programs")
+    try:
+        coll.validate_graph(collection,
+                            {e.bundle.id for e in entries if e.bundle is not None})
+    except coll.CollectionError as exc:
+        warnings.append(str(exc))
+        return None, warnings
+    return collection, warnings
+
+
 def _run_folder(console, folder: str, patches: Sequence[str],
                 extra_dirs: Sequence[str], assume_yes: bool,
                 force: bool) -> int:
@@ -527,14 +606,21 @@ def _run_folder(console, folder: str, patches: Sequence[str],
         if os.path.isfile(candidate):
             manifest = candidate
             break
-    if not manifest:
-        raise WizardError(
-            "this folder has no patch set in it.\n"
-            "  A folder patch set is a 'surreal-collection.json' listing the "
-            ".morph files.\n"
-            "  Run `surreal collection list <folder>` to check one, or drag the "
-            "single .exe instead.", EXIT_USAGE)
-    loaded = coll.load_collection(manifest)
+    if manifest:
+        loaded = coll.load_collection(manifest)
+    else:
+        loaded, warnings = collection_from_folder(console, folder)
+        for note in warnings:
+            console.warn(note)
+        if loaded is None:
+            raise WizardError(
+                "this folder is not something I can patch as a set.\n"
+                "  Expected either 'surreal-collection.json' plus .morph files, "
+                "or .morph files that match the .exe/.dll files here.\n"
+                "  `surreal doctor %s` lists what it found, or drag the single "
+                ".exe instead." % folder, EXIT_USAGE)
+        console.kv("source", "built from the %d .morph file(s) in this folder"
+                   % len(loaded.entries))
     console.say("")
     console.kv("patch set", loaded.name)
     console.kv("files", ", ".join(loaded.files()) or "(none)")
@@ -805,14 +891,22 @@ def _doctor_folder(console, folder: str, patches: Sequence[str],
             manifest = candidate
             break
     if not manifest:
-        out.append(("note", "no patch set here - single-file patching still works "
-                            "if you drag the .exe itself"))
-        return out
-    try:
-        loaded = coll.load_collection(manifest)
-    except coll.CollectionError as exc:
-        out.append(("problem", str(exc)))
-        return out
+        # no manifest is fine: loose .morph files next to the programs work too
+        loaded, warnings = collection_from_folder(console, folder)
+        for note in warnings:
+            out.append(("note", note))
+        if loaded is None:
+            out.append(("note", "no patch set found - put the .morph files next to "
+                                "the programs, or drag the .exe itself"))
+            return out
+        out.append(("ok", "no manifest; %d loose .morph file(s) pair up with the "
+                          "programs here" % len(loaded.entries)))
+    else:
+        try:
+            loaded = coll.load_collection(manifest)
+        except coll.CollectionError as exc:
+            out.append(("problem", str(exc)))
+            return out
     out.append(("ok", "patch set %r: %d patch(es) for %s"
                 % (loaded.name, len(loaded.entries), ", ".join(loaded.files()))))
     try:

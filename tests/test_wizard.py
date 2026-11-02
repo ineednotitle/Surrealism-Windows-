@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import unittest
 import unittest.mock
 
@@ -275,10 +276,69 @@ class TestEasyFlow(WizardCase):
         self.assertIn("rolled back", out)
         self.assertEqual(sha256_file(self.app), pristine)
 
-    def test_folder_without_a_patch_set_says_what_to_do(self):
-        code, out, err = run("easy", self.dir, "--yes")
+    def test_folder_without_any_patches_says_what_to_do(self):
+        empty = self.path("empty")
+        os.makedirs(empty, exist_ok=True)
+        write(os.path.join(empty, "app.exe"), sample_app())
+        code, out, err = run("easy", empty, "--yes")
         self.assertEqual(code, 2)
-        self.assertIn("no patch set", out + err)
+        self.assertIn("not something I can patch as a set", out + err)
+        self.assertIn("surreal doctor", out + err)
+
+    def test_folder_of_loose_patches_needs_no_manifest(self):
+        # exactly what a beginner does: copy the .morph files next to the .exe and
+        # drag the folder on. It used to demand a hand-written manifest.
+        run("init", "--accept-policy")
+        before = sha256_file(self.app)
+        code, out, err = run("easy", self.dir, "--yes")
+        self.assertEqual(code, 0, err)
+        self.assertIn("built from the 1 .morph file", out)
+        self.assertIn("one transaction", out)
+        self.assertNotEqual(sha256_file(self.app), before)
+        self.assertEqual(run("undo", self.app)[0], 0)
+        self.assertEqual(sha256_file(self.app), before)
+
+    def test_loose_patch_that_matches_nothing_is_reported(self):
+        run("init", "--accept-policy")
+        lonely = self.path("elsewhere")
+        os.makedirs(lonely, exist_ok=True)
+        other = write(os.path.join(lonely, "other.exe"), sample_app(patch=True))
+        shutil.copyfile(self.bundle, os.path.join(lonely, "tweak.morph"))
+        code, _out, err = run("easy", lonely, "--yes")
+        self.assertEqual(code, 2)
+        self.assertIn("does not match any program here", err)
+        self.assertIn("not something I can patch as a set", err)
+
+    def test_loose_patch_matching_two_files_is_not_guessed(self):
+        run("init", "--accept-policy")
+        twin_dir = self.path("twins")
+        os.makedirs(twin_dir, exist_ok=True)
+        write(os.path.join(twin_dir, "a.exe"), sample_app())
+        write(os.path.join(twin_dir, "b.exe"), sample_app())
+        # a bundle that only identifies its target by size cannot say which twin
+        with open(self.bundle, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        raw["target"] = {"size": len(sample_app())}
+        with open(os.path.join(twin_dir, "size-only.morph"), "w",
+                  encoding="utf-8") as fh:
+            json.dump(raw, fh)
+        code, _out, err = run("easy", twin_dir, "--yes")
+        self.assertEqual(code, 2)
+        self.assertIn("more than one file", err)
+        self.assertEqual(sha256_file(os.path.join(twin_dir, "a.exe")),
+                         sha256_file(self.app))
+
+    def test_filename_hint_resolves_identical_twins(self):
+        run("init", "--accept-policy")
+        twin_dir = self.path("twins2")
+        os.makedirs(twin_dir, exist_ok=True)
+        write(os.path.join(twin_dir, "demo.exe"), sample_app())
+        write(os.path.join(twin_dir, "copy.exe"), sample_app())
+        shutil.copyfile(self.bundle, os.path.join(twin_dir, "tweak.morph"))
+        code, _out, err = run("easy", twin_dir, "--yes")
+        self.assertEqual(code, 0, err)
+        self.assertNotEqual(sha256_file(os.path.join(twin_dir, "demo.exe")),
+                            sha256_file(os.path.join(twin_dir, "copy.exe")))
 
     def test_folder_with_a_patch_set_patches_as_one_transaction(self):
         run("init", "--accept-policy")

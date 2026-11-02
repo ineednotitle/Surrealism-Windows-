@@ -4,7 +4,7 @@ All notable changes to **Surrealism Window** (`surreal`). Bundle format version 
 `surreal.morph` v1 throughout; every release is additive within that format, so a
 bundle written for an older version keeps loading.
 
-## Unreleased — history and restore
+## Unreleased — history, restore, manifest-free folders
 
 * `surreal history <exe>` lists every recorded state of a file, newest first: when,
   which bundle (or patch set), the resulting hash, and whether the backup still
@@ -17,6 +17,12 @@ bundle written for an older version keeps loading.
 * `undo` now recognises "the file already has its original bytes" and treats it as
   success with an explanation, instead of a scary mismatch.
 * `doctor` points at `history` when a file has more than one recorded change.
+* Dropping a **folder** no longer needs a hand-written
+  `surreal-collection.json`: `.morph` files sitting next to the `.exe`/`.dll`
+  files are paired with the one program they match (a filename hint breaks ties),
+  applied as the same all-or-nothing vault transaction, and anything ambiguous or
+  unmatched is reported instead of guessed. `surreal doctor <folder>` explains the
+  same pairing.
 * 17 new tests and one new CI scenario (15 total); the frozen-exe smoke also runs
   `history` and `restore`.
 

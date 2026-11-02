@@ -410,6 +410,7 @@ pure standard library, so the same code runs from source and from the `.exe`.
 | you patched twice, or the file was edited since | `surreal history app.exe` then `surreal restore app.exe --from 2` |
 | "cannot replace … the file is locked" | close the program (and any launcher holding it), or add a folder exclusion to your antivirus |
 | a patch refuses with "does not fit this build" | the bundle declares conditions the target fails; re-author it against your build with `surreal diff` |
+| a folder of patches (no manifest) | drag the folder on `surreal.exe` — .morph files next to the `.exe`/`.dll` files are paired up automatically and applied as one transaction |
 | you have no patch files at all | `surreal demo` writes a practice pair, and `surreal diff old.exe new.exe -o mine.morph --id com.you.mine` makes one from two builds you own |
 
 Every state is journalled next to the file (`.surreal/`), the backup is verified
