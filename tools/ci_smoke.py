@@ -269,6 +269,64 @@ def main() -> int:
         run("revert", state["app"])
         return "indexed, resolved by id, applied and reverted"
 
+    @scenario("easy mode (dragged file)")
+    def _easy():
+        import builtins
+
+        dropdir = os.path.join(work, "drop")
+        shutil.copytree(demo, dropdir)
+        app = os.path.join(dropdir, "demo_app.exe")
+        before = sha256_file(app)
+        # no subcommand at all: exactly what dragging the .exe onto the window does
+        code, out, err = run(app, "--yes")
+        if "is patched" not in out:
+            raise AssertionError("easy mode did not report success:\n%s%s" % (out, err))
+        if sha256_file(app) == before:
+            raise AssertionError("easy mode left the file unchanged")
+        run("undo", app)
+        if sha256_file(app) != before:
+            raise AssertionError("undo did not restore the original bytes")
+        # the same flow answering the prompts (policy -> choice -> confirm) on a
+        # machine that has not accepted the policy yet, so all three are exercised
+        answers = iter(["y", "a", "y"])
+        real_input = builtins.input
+        builtins.input = lambda *a: next(answers)
+        saved = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "APPDATA")}
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(work, "config-fresh")
+        os.environ["APPDATA"] = os.environ["XDG_CONFIG_HOME"]
+        try:
+            code, out, err = run(app)
+        finally:
+            builtins.input = real_input
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        if "is patched" not in out:
+            raise AssertionError("prompted easy mode failed:\n%s%s" % (out, err))
+        run("undo", app)
+        # json mode: no prompts, parseable, says whether a patch fits
+        code, out, _err = run("--json", "easy", app, "-y")
+        info = json.loads(out)
+        if not info.get("ok") or not info["patches"][0]["applies"]:
+            raise AssertionError("easy --json did not report an applicable patch")
+        run("undo", app)
+        return "dragged file patched, undone, prompted and json flows agree"
+
+    @scenario("doctor")
+    def _doctor():
+        code, out, _err = run("doctor", state["app"], "--dir", patches)
+        if code != 0:
+            raise AssertionError("doctor exited %d:\n%s" % (code, out))
+        if "everything needed is in place" not in out:
+            raise AssertionError("doctor did not reach a verdict:\n%s" % out)
+        code, out, _err = run("--json", "doctor", state["app"], "--dir", patches)
+        info = json.loads(out)
+        if not info.get("ok") or not info.get("checks"):
+            raise AssertionError("doctor --json is not usable by scripts")
+        return "checks machine, file and patches; json for scripts"
+
     @scenario("tui (piped answers)")
     def _tui():
         import builtins

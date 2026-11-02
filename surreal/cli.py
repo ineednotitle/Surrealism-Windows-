@@ -1313,6 +1313,60 @@ def cmd_demo(args, console: Console) -> int:
     return EXIT_OK
 
 
+def cmd_easy(args, console: Console) -> int:
+    """Guided mode: find patches, explain them, apply with a rollback."""
+    from . import wizard
+
+    if console.json_mode:
+        return wizard.run_json(console, target=args.what or "",
+                               patches=args.patch or [],
+                               extra_dirs=args.dir or [],
+                               apply_now=args.yes)
+    try:
+        return wizard.run(console, target=args.what or "",
+                          patches=args.patch or [],
+                          extra_dirs=args.dir or [],
+                          assume_yes=args.yes)
+    except wizard.WizardError as exc:
+        if exc.code == EXIT_OK:
+            console.err(str(exc))
+            return EXIT_OK
+        return _die(console, str(exc), exc.code)
+
+
+def cmd_doctor(args, console: Console) -> int:
+    """Say whether this machine, this file and these patches will work together."""
+    from . import wizard
+
+    if console.json_mode:
+        return wizard.doctor_json(console, target=args.what or "",
+                                  patches=args.patch or [],
+                                  extra_dirs=args.dir or [])
+    return wizard.doctor(console, target=args.what or "",
+                         patches=args.patch or [],
+                         extra_dirs=args.dir or [])
+
+
+def cmd_undo(args, console: Console) -> int:
+    """Plain-language alias for ``revert``: put the original file back."""
+    console.head(BANNER)
+    console.kv("restoring", os.path.abspath(args.target))
+    try:
+        result = patcher.revert(args.target, force_unlock=args.force_unlock)
+    except patcher.PatchError as exc:
+        if "nothing to revert" in str(exc) or "already a revert" in str(exc):
+            console.warn("%s - the file already looks original" % exc)
+            return EXIT_OK
+        return _die(console, str(exc), exc.code)
+    except OSError as exc:
+        return _die(console, "IO error: %s" % exc, EXIT_IO)
+    console.ok("restored %s from its backup" % os.path.basename(args.target))
+    console.kv("sha256 now", result["restored_sha256"])
+    if result.get("backup"):
+        console.kv("backup used", result["backup"])
+    return EXIT_OK
+
+
 def cmd_selftest(args, console: Console) -> int:
     """Prove the toolchain works end to end on a synthetic PE built in memory."""
     from .testkit import make_pe_pair, run_selftest
@@ -1521,6 +1575,30 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--out", default="surreal-demo", help="output directory")
     sp.set_defaults(func=cmd_demo)
 
+    sp = add("easy", "guided mode: pick a program, see your patches, apply safely")
+    sp.add_argument("what", nargs="?", default="",
+                    help="the .exe (or folder) to patch — dropped files welcome")
+    sp.add_argument("--patch", action="append", metavar="FILE", default=[],
+                    help="use this .morph file (repeatable)")
+    sp.add_argument("--dir", action="append", metavar="DIR", default=[],
+                    help="also look for .morph files here (repeatable)")
+    sp.add_argument("--yes", "-y", action="store_true",
+                    help="assume yes: apply every applicable patch")
+    sp.set_defaults(func=cmd_easy)
+
+    sp = add("doctor", "check that this machine, file and patches will work")
+    sp.add_argument("what", nargs="?", default="",
+                    help="the .exe (or folder) you are about to patch")
+    sp.add_argument("--patch", action="append", metavar="FILE", default=[])
+    sp.add_argument("--dir", action="append", metavar="DIR", default=[])
+    sp.set_defaults(func=cmd_doctor)
+
+    sp = add("undo", "put the original file back (same as revert, plainer)")
+    sp.add_argument("target")
+    sp.add_argument("--force-unlock", action="store_true",
+                    help="break a lock left by a crashed run")
+    sp.set_defaults(func=cmd_undo)
+
     sp = add("selftest", "end-to-end check on a synthetic PE (safe, no targets)")
     sp.add_argument("--keep", action="store_true", help="keep the temp workspace")
     sp.add_argument("--workdir", default=None)
@@ -1529,12 +1607,41 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _redirect_dropped_file(argv: List[str]) -> List[str]:
+    """``surreal app.exe`` / drag-and-drop means easy mode, not an error.
+
+    Windows hands a dropped file to the program as the first argument, and a
+    first-time user will type the file name too. Anything that looks like a path
+    and is not a known subcommand is routed to ``easy``.
+    """
+    if not argv or argv[0].startswith("-"):
+        return argv
+    known = {"init", "inspect", "scan", "diff", "info", "check", "apply",
+             "revert", "undo", "sign", "keys", "verify", "collection", "repo",
+             "tui", "demo", "selftest", "easy", "doctor", "help"}
+    if argv[0] in known:
+        return argv
+    from . import wizard
+
+    if wizard.looks_like_path(argv[0]):
+        return ["easy"] + argv
+    return argv
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
+    interactive = argv is None
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
-        parser.print_help()
-        return EXIT_OK
+        # double-clicked .exe (or a bare `surreal` in a console): run easy mode
+        # when somebody is there to answer, otherwise print the usage table
+        if interactive and sys.stdin is not None and sys.stdin.isatty() \
+                and sys.stdout is not None and sys.stdout.isatty():
+            argv = ["easy"]
+        else:
+            parser.print_help()
+            return EXIT_OK
+    argv = _redirect_dropped_file(argv)
     args = parser.parse_args(argv)
     console = Console(json_mode=getattr(args, "json", False),
                       quiet=getattr(args, "quiet", False))

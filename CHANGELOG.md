@@ -4,6 +4,31 @@ All notable changes to **Surrealism Window** (`surreal`). Bundle format version 
 `surreal.morph` v1 throughout; every release is additive within that format, so a
 bundle written for an older version keeps loading.
 
+## Unreleased — easy mode, doctor, undo
+
+### A guided front end
+* `surreal easy [<exe>|<folder>]` (and simply **dragging a file onto
+  `surreal.exe`**, which is now routed there instead of erroring) finds `.morph`
+  files next to the program, in a `patches/` sibling, in `%SURREAL_PATCHES%` and
+  in the current folder, then says per patch whether it fits *this* build.
+  It explains the usage policy in five lines once per machine, backs up, applies
+  the chosen subset, rolls everything back if a later patch fails, and prints the
+  exact undo command.
+* `surreal doctor [<exe>|<folder>]` reports, in order: version/runtime, settings
+  folder writability, policy state, temp space, PE validity, write permission,
+  stale locks, journal history, and which patches match — with `--json` for
+  scripts.
+* `surreal undo <exe>` is `revert` in plainer words, and treats "nothing to
+  undo" as success instead of an error.
+* A folder (or a whole application directory with a `surreal-collection.json`)
+  can be dropped instead of a single file: easy mode then runs the vault
+  preflight and applies every file as one transaction.
+* `--json` for easy mode: `{ok, target, patches[{id,applies,reason,signed_by}],
+  applied[]}` — a supported way to ask "does a patch exist for this build?".
+* Easy mode never writes to stdout in `--json` mode, works with piped answers
+  (`printf 'y\na\ny\n' | surreal easy app.exe`), and is covered by 39 unit tests
+  plus two new CI smoke scenarios (13 total) and the frozen-exe smoke run.
+
 ## v0.5.0 — layout changes, vaults, dependencies, repos
 
 ### Collections across files

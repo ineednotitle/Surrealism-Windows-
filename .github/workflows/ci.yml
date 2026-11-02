@@ -138,6 +138,7 @@ jobs:
             fi
           }
           step ./dist/surreal.exe --version
+          step ./dist/surreal.exe doctor
           step ./dist/surreal.exe selftest
           step ./dist/surreal.exe demo --out frozen-demo
           step ./dist/surreal.exe check frozen-demo/demo-shorten-nag.morph --target frozen-demo/demo_app.exe
@@ -151,6 +152,13 @@ jobs:
           step ./dist/surreal.exe collection list frozen-demo/examples
           step ./dist/surreal.exe repo index frozen-demo/examples -o frozen-demo/repo.json
           step ./dist/surreal.exe repo list frozen-demo/repo.json --target frozen-demo/demo_app.exe
+          echo "==== easy mode (dragged file)" | tee -a frozen.log
+          if ! ./dist/surreal.exe frozen-demo/demo_app.exe --yes >> frozen.log 2>&1; then
+            tail_text=$(tail -n 25 frozen.log | tr '\n' '|' | sed 's/%/%25/g')
+            echo "::error title=frozen exe failed at: easy::${tail_text:0:2500}"
+            exit 1
+          fi
+          step ./dist/surreal.exe undo frozen-demo/demo_app.exe
           echo "==== tui (piped)" | tee -a frozen.log
           if ! printf 'q\n' | ./dist/surreal.exe tui --target frozen-demo/demo_app.exe --dir frozen-demo/examples >> frozen.log 2>&1; then
             tail_text=$(tail -n 25 frozen.log | tr '\n' '|' | sed 's/%/%25/g')

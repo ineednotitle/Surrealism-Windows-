@@ -21,6 +21,34 @@ the app — reproducibly, reversibly, and on a 4 GB machine.
 
 ---
 
+## Start here (no command line knowledge needed)
+
+Download `surreal.exe`, then **drag the program you want to patch onto it** (or
+double-click it and drag the file into the window). That is the whole procedure:
+
+1. it looks for `.morph` patch files next to the program, in a `patches` folder
+   next to it, in `%SURREAL_PATCHES%`, and in the current folder;
+2. it tells you, per patch, **"can be applied"** or **"skipped - made for a
+   different build of this program"** — it never forces a patch onto the wrong
+   version;
+3. it asks once whether the five-point usage policy applies to you;
+4. it backs the file up, applies what you picked, and prints the one command that
+   undoes it (`surreal undo app.exe`).
+
+If something does not work, `surreal doctor app.exe` explains *why*, in order:
+machine, policy, temp space, write permission, PE validity, existing backups, and
+which patches fit this exact build.
+
+```
+  surreal app.exe                  # same as: surreal easy app.exe
+  surreal doctor app.exe           # "why can't I patch this?"
+  surreal undo app.exe             # put the original back
+```
+
+Everything below is the same tool with the training wheels off — the guided mode
+is a front end for `check` + `apply` + `revert`, not a different code path, so it
+carries the same backups, journals and all-or-nothing rollback.
+
 ## Why another patcher?
 
 Morphe-style tools (ReVanced, LuckyPatcher, xdelta patchers) teach one important
@@ -102,6 +130,9 @@ $ python -m surreal check surreal-demo/demo-shorten-nag.morph `
 
 | Command | What it does |
 |---|---|
+| `easy [<exe>|<folder>]` | **guided mode** — finds patches, explains which fit, applies with a rollback; a bare `surreal <exe>` (drag-and-drop) is the same thing |
+| `doctor [<exe>|<folder>]` | explains every reason a patch might not apply here (policy, permissions, temp space, PE validity, build match) |
+| `undo <exe>` | plain-language `revert`: puts the original file back, and treats "already original" as success |
 | `init` | prints the acceptable-use policy; `--accept-policy` records it (required before the first write), `--revoke` forgets it |
 | `inspect <exe>` | PE32/PE32+ headers, sections, entropy, checksum, overlay, Authenticode state, imports/exports, notable strings, and honest heuristics ("section .vmp0 present: looks like VMProtect") |
 | `scan <exe> --pattern "48 8B ?? E8"` | wildcard byte search → file offset, RVA, section, hexdump |

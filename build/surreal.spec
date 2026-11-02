@@ -31,6 +31,7 @@ a = Analysis(
         "surreal.journal", "surreal.policy", "surreal.testkit", "surreal.util",
         "surreal.keys", "surreal.lock", "surreal.memguard", "surreal.reloc",
         "surreal.collection", "surreal.repo", "surreal.surgery",
+        "surreal.wizard",
     ],
     hookspath=[],
     hooksconfig={},
