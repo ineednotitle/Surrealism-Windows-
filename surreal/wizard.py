@@ -125,6 +125,11 @@ def search_dirs(target: str = "", extra: Sequence[str] = ()) -> List[str]:
     add(os.path.join(base, "surreal-patches") if base else "")
     for item in (os.environ.get(PATCH_ENV) or "").split(os.pathsep):
         add(item.strip())
+    # people download a .morph and leave it in Downloads; meeting them there is
+    # the difference between "it works" and "it says no patch files"
+    home = os.path.expanduser("~")
+    add(os.path.join(home, "Downloads"))
+    add(os.path.join(home, "Desktop"))
     try:
         cwd = os.getcwd()
     except OSError:            # a deleted working directory should not crash us

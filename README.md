@@ -68,7 +68,7 @@ Pick whichever fits your machine:
 
 | Method | Command | Notes |
 |---|---|---|
-| Prebuilt binary | download `surreal.exe` from [Releases](../../releases/tag/v0.5.0) | no Python needed, ~8 MB, unsigned; SHA-256 in the release notes |
+| Prebuilt binary | download `surreal.exe` from [Releases](../../releases/latest) | no Python needed, ~8 MB, unsigned; SHA-256 in the release notes |
 | From source (any OS) | `git clone … && cd Surrealism-Windows- && python -m surreal --help` | Python 3.9+, **stdlib only** — no pip install |
 | Build your own exe | `powershell -ExecutionPolicy Bypass -File build/build_windows.ps1` | needs `pip install pyinstaller` |
 
@@ -100,7 +100,7 @@ $ python -m surreal demo
   hunks:  2 (all anchored: 2)
 
 $ python -m surreal inspect surreal-demo/demo_app.exe
-surreal 0.5.0 — Surrealism Window · windows patch workbench
+surreal 0.6.0 — Surrealism Window · windows patch workbench
   …\surreal-demo\demo_app.exe  (2.0 KiB)
   sha256 4d51cec411ac4bf2856d007044be52d8da0713e4abe227f02244193c66251408
 

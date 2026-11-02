@@ -1681,6 +1681,27 @@ def _redirect_dropped_file(argv: List[str]) -> List[str]:
     return argv
 
 
+def _pause_if_double_clicked(code: int) -> None:
+    """Keep the window open when the frozen .exe was started from Explorer.
+
+    A console program that exits takes its window with it, so a first-time user
+    who dragged a file onto ``surreal.exe`` and hit an error would see a flash and
+    nothing else. Only in a frozen build with a real console attached, and only
+    when something went wrong.
+    """
+    if code == EXIT_OK or not getattr(sys, "frozen", False):
+        return
+    try:
+        if not (sys.stdin and sys.stdin.isatty() and sys.stdout and sys.stdout.isatty()):
+            return
+    except (ValueError, OSError):
+        return
+    try:
+        input("\n  Press Enter to close this window. ")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     interactive = argv is None
@@ -1711,12 +1732,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.print_help()
         return EXIT_USAGE
     try:
-        return args.func(args, console)
+        code = args.func(args, console)
+        _pause_if_double_clicked(code)
+        return code
     except KeyboardInterrupt:
         console.err("interrupted")
+        _pause_if_double_clicked(130)
         return 130
     except memguard.MemoryLimitError as exc:
-        return _die(console, str(exc), EXIT_IO)
+        code = _die(console, str(exc), EXIT_IO)
+        _pause_if_double_clicked(code)
+        return code
     except BrokenPipeError:  # e.g. `surreal inspect x.exe | head`
         return EXIT_OK
     finally:

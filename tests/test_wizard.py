@@ -109,6 +109,17 @@ class TestRouting(WizardCase):
         with unittest.mock.patch.dict(os.environ, {wizard.PATCH_ENV: elsewhere}):
             self.assertIn(os.path.abspath(moved), wizard.find_patches(self.app))
 
+    def test_downloads_folder_is_searched(self):
+        home = self.path("home")
+        downloads = os.path.join(home, "Downloads")
+        os.makedirs(downloads, exist_ok=True)
+        moved = os.path.join(downloads, "downloaded.morph")
+        os.replace(self.bundle, moved)
+        with unittest.mock.patch.dict(os.environ, {"HOME": home,
+                                                   "USERPROFILE": home}):
+            found = wizard.find_patches(self.app)
+        self.assertIn(os.path.abspath(moved), found)
+
     def test_explicit_patch_folder_wins_the_search_order(self):
         extra = self.path("downloads")
         os.makedirs(extra, exist_ok=True)

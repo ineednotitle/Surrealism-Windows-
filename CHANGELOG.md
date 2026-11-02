@@ -4,7 +4,7 @@ All notable changes to **Surrealism Window** (`surreal`). Bundle format version 
 `surreal.morph` v1 throughout; every release is additive within that format, so a
 bundle written for an older version keeps loading.
 
-## Unreleased — conditions, easy mode, doctor, undo
+## v0.6.0 — conditions, easy mode, doctor, undo
 
 ### Conditional patches (declarative, no code execution)
 * A bundle may declare `requires` — all of which must hold, or the patch is
@@ -25,13 +25,14 @@ bundle written for an older version keeps loading.
 * New example `examples/demo-conditional.morph` and doc
   [`docs/CONDITIONS.md`](docs/CONDITIONS.md); 47 new tests, 1 new CI scenario.
 
-## Unreleased — easy mode, doctor, undo
+### Easy mode, doctor, undo (same release)
 
 ### A guided front end
 * `surreal easy [<exe>|<folder>]` (and simply **dragging a file onto
   `surreal.exe`**, which is now routed there instead of erroring) finds `.morph`
-  files next to the program, in a `patches/` sibling, in `%SURREAL_PATCHES%` and
-  in the current folder, then says per patch whether it fits *this* build.
+  files next to the program, in a `patches/` sibling, in `%SURREAL_PATCHES%`, in
+  `Downloads`/`Desktop` and in the current folder, then says per patch whether it
+  fits *this* build.
   It explains the usage policy in five lines once per machine, backs up, applies
   the chosen subset, rolls everything back if a later patch fails, and prints the
   exact undo command.
@@ -47,8 +48,11 @@ bundle written for an older version keeps loading.
 * `--json` for easy mode: `{ok, target, patches[{id,applies,reason,signed_by}],
   applied[]}` — a supported way to ask "does a patch exist for this build?".
 * Easy mode never writes to stdout in `--json` mode, works with piped answers
-  (`printf 'y\na\ny\n' | surreal easy app.exe`), and is covered by 39 unit tests
-  plus two new CI smoke scenarios (13 total) and the frozen-exe smoke run.
+  (`printf 'y\na\ny\n' | surreal easy app.exe`), and is covered by unit tests plus
+  CI smoke scenarios and the frozen-exe smoke run.
+* A frozen `surreal.exe` started from Explorer now keeps its console window open
+  on failure ("Press Enter to close"), instead of flashing and vanishing — the
+  single most common way a double-clicked console tool looks "broken".
 
 ## v0.5.0 — layout changes, vaults, dependencies, repos
 

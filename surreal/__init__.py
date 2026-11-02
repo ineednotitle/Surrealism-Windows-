@@ -3,7 +3,7 @@
 Pure standard library. Works on Windows, Linux and macOS (analysis side).
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 TOOL_NAME = "surreal"
 FORMAT_NAME = "surreal.morph"
 FORMAT_VERSION = 1
